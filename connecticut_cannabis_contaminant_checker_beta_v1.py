@@ -1070,7 +1070,23 @@ def build_pdf(flagged: list, out_path: str, watch: int):
                          0.78*inch])
     t.setStyle(TableStyle(style_cmds))
     story.append(t)
-    doc.build(story)
+
+    def _footer(canvas, doc_):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 6.5)
+        canvas.setFillColor(colors.HexColor("#555555"))
+        w, _h = landscape(letter)
+        line1 = ("Beta tool — every flag is a LEAD, not a conclusion. Verify each "
+                 "product against its COA (registration # shown in each row) before "
+                 "relying on or sharing any result.")
+        line2 = ("Found a misread? Please report it: github.com/jmlschlee/"
+                 "Connecticut-Cannabis-Contaminant-Checker-Beta-V1/issues")
+        canvas.drawCentredString(w / 2.0, 0.30 * inch, line1)
+        canvas.drawCentredString(w / 2.0, 0.20 * inch, line2)
+        canvas.drawRightString(w - 0.35 * inch, 0.20 * inch, f"Page {doc_.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     print(f"Wrote {out_path}  ({len(flagged)} rows)")
 
 
