@@ -1,0 +1,22 @@
+CannaScope CT Beta Version 4 — macOS
+====================================
+If macOS says "Run CannaScope CT.command" cannot be opened or is from an
+unidentified developer, that is NORMAL (it's just blocking a downloaded
+script). Do ONE of these:
+
+OPTION 1 (easiest): Right-click "Run CannaScope CT.command" -> Open -> Open.
+   (Newer macOS: try once, then System Settings > Privacy & Security >
+    "Open Anyway".)
+OPTION 2: Open Terminal, type:  xattr -cr
+   then drag this folder onto Terminal and press Return. Then double-click
+   "Run CannaScope CT.command".
+
+First run sets up Python deps (needs Python 3.9+) and then scans the last 60
+days of products. When it finishes, your numbered report appears as:
+   CannaScope CT Beta Version 4 - Flagged Products - N.pdf   (a NEW number each run)
+right next to this file, with full data in:
+   CannaScope CT - Flagged Product Results and Sources/
+
+Every flag is a LEAD to verify against the product's COA (its number is a
+clickable link in the report). Report misreads:
+github.com/jmlschlee/Connecticut-Cannabis-Contaminant-Checker-Beta-V1/issues

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] — CannaScope CT Beta Version 4 — 2026-06-02
+
+### CannaScope CT Beta Version 4
+- Adds CannaScope CT Standard.
+- Separates Connecticut Legal Limit from CannaScope CT Standard.
+- Uses 10,000 CFU/g CannaScope CT Standard for yeast/mold and aerobic bacteria.
+- Uses 50% of Connecticut Legal Limit as CannaScope CT Standard for metals, mycotoxins, pesticides, and other regulated contaminants.
+- Adds + / - comparison against CannaScope CT Standard.
+- Adds Date Created and Time Created to reports.
+- Adds improved Executive Summary sections.
+- Improves capitalization, font readability, spacing, table layout, and overall PDF appearance.
+- Adds or updates macOS, Windows, and Linux Version 4 run/build support.
+
 ## [0.3.0] — CannaScope CT Version 3 Beta — 2026-06-02
 
 Adds proximity-to-limit reporting against BOTH the CT legal limit and a stricter
