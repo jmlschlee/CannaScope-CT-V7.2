@@ -236,7 +236,7 @@ ANALYTE_SPECS = [
 KNOWN_LABS = [
     (re.compile(r"analytics\s*,?\s*(?:labs?|llc)?", re.I), "Analytics Labs"),
     (re.compile(r"altasci", re.I), "AltaSci Laboratories"),
-    (re.compile(r"northeast\s+laborator", re.I), "Northeast Laboratories"),
+    (re.compile(r"northeast\s+laborator|\bnelabs\b|nelabsct", re.I), "Northeast Laboratories"),
     (re.compile(r"proverde", re.I), "ProVerde Laboratories"),
     (re.compile(r"abko", re.I), "ABKO Labs"),
     (re.compile(r"trichome\s+analytical", re.I), "Trichome Analytical"),
@@ -762,9 +762,16 @@ def parse_lab(text: str) -> str:
     for rx, name in KNOWN_LABS:
         if rx.search(text):
             return name
+    # Heuristic fallback for an unlisted lab: only accept a line that names a lab
+    # ("Laboratories" / "Labs" / "Analytics"), and skip COA section headers (e.g.
+    # "~ Stability Testing ~", "Ingredient Testing") that merely contain "testing".
     for ln in text.splitlines()[:60]:
-        s = ln.strip()
-        if 3 < len(s) < 60 and re.search(r"laborator|analytics|\blabs?\b|testing", s, re.I):
+        s = ln.strip(" ~*-\t")
+        if not (3 < len(s) < 60):
+            continue
+        if re.search(r"stability|ingredient|residual|microbiolog|mycotoxin|panel", s, re.I):
+            continue
+        if re.search(r"laborator|analytics|\blabs?\b", s, re.I):
             return s
     return "Unknown (see COA)"
 
@@ -1015,7 +1022,10 @@ def apply_flags(p: Product, text: str, watch: int):
         if e and e.get("status") == "DETECTED":
             p.flags.append(f"PROHIBITED_DETECTED: {nice} DETECTED (zero tolerance)")
 
-    # 2. Heavy metals + mycotoxins: any DETECTED amount flags the product.
+    # 2. Heavy metals + mycotoxins: flag only at/over the CannaScope CT Standard
+    #    (50% of the Connecticut Legal Limit). Over the legal limit -> RED;
+    #    CannaScope CT Standard..legal -> ORANGE; below the standard -> NOT flagged
+    #    (so trace detections well under the limit no longer create noise).
     for key in DETECTABLE_CONTAMINANTS:
         e = a.get(key)
         if not e or e.get("value") is None or e["value"] <= 0:
@@ -1024,23 +1034,31 @@ def apply_flags(p: Product, text: str, watch: int):
             continue
         nm = e.get("name", key)
         lim = e.get("limit")
+        std = cannascope_standard(key, lim, watch)
         if lim and e["value"] > lim:
-            p.flags.append(f"OVER_CT_LIMIT: {nm} {_amount(e)} exceeds COA limit "
-                           f"{lim:g} {e.get('unit','')}".rstrip())
-        else:
-            within = f" (within COA limit {lim:g})" if lim else ""
-            p.flags.append(f"CONTAMINANT_DETECTED: {nm} {_amount(e)} detected{within}")
+            p.flags.append(f"OVER_CT_LIMIT: {nm} {_amount(e)} exceeds Connecticut "
+                           f"Legal Limit {lim:g} {e.get('unit','')}".rstrip())
+        elif std and e["value"] >= std:
+            within = f"; within Connecticut Legal Limit {lim:g}" if lim else ""
+            p.flags.append(f"CONTAMINANT_DETECTED: {nm} {_amount(e)} "
+                           f"(over CannaScope CT Standard {std:g}{within})")
+        # else: detected but below the CannaScope CT Standard -> not flagged
 
-    # 2b. Residual solvents: ANY itemized detection -> YELLOW (report the level);
-    #     over the COA's ppm limit -> RED; a failed solvent panel -> RED.
+    # 2b. Residual solvents: flag at/over the CannaScope CT Standard (50% of the
+    #     ppm limit). Over the ppm limit -> RED; standard..limit -> YELLOW; below
+    #     the standard -> not flagged. A failed solvent panel -> RED.
     for h in p.solvent_hits:
         amt = f"{h['value']:,.3f}".rstrip("0").rstrip(".") + f" {h.get('unit','ppm')}"
-        if h.get("limit") and h["value"] > h["limit"]:
-            p.flags.append(f"OVER_CT_LIMIT: {h['name']} {amt} exceeds COA limit "
-                           f"{h['limit']:g} ppm")
-        else:
-            within = f" (limit {h['limit']:g} ppm)" if h.get("limit") else ""
-            p.flags.append(f"SOLVENT_DETECTED: {h['name']} {amt} detected{within}")
+        lim = h.get("limit")
+        std = lim * CANNASCOPE_FRACTION if lim else None
+        if lim and h["value"] > lim:
+            p.flags.append(f"OVER_CT_LIMIT: {h['name']} {amt} exceeds Connecticut "
+                           f"Legal Limit {lim:g} ppm")
+        elif std and h["value"] >= std:
+            p.flags.append(f"SOLVENT_DETECTED: {h['name']} {amt} (over CannaScope "
+                           f"CT Standard {std:g} ppm; limit {lim:g} ppm)")
+        elif not lim:
+            p.flags.append(f"SOLVENT_DETECTED: {h['name']} {amt} detected")
     if p.solvents == "FAIL" and not p.solvent_hits:
         p.flags.append("OVER_CT_LIMIT: residual solvent panel FAIL (verify against COA)")
 
@@ -1050,20 +1068,34 @@ def apply_flags(p: Product, text: str, watch: int):
         p.flags.append("OVER_CT_LIMIT: pesticide panel FAIL (prohibited/over-limit "
                        "pesticide -- verify against COA)")
 
-    # 3. Total-count microbials over CT's codified ceiling (not 'any amount' --
-    #    these are always present in some quantity).
-    for key, nice in (("aerobic", "total aerobic"), ("coliform", "total coliform"),
+    # 3. Total aerobic bacteria: > Connecticut Legal Limit -> RED; >= CannaScope
+    #    CT Standard (the 10,000 CFU/g watch line) but legal -> YELLOW. Coliform /
+    #    bile-tolerant gram-negative flag only if a limit is present and exceeded.
+    aer = a.get("aerobic")
+    if aer and aer.get("value") is not None:
+        av = aer["value"]
+        alim = aer.get("limit") or CT_MICRO_LIMIT
+        if av > alim:
+            p.flags.append(f"OVER_CT_LIMIT: total aerobic {_amount(aer)} > "
+                           f"{alim:,.0f} CFU/g (Connecticut Legal Limit)")
+        elif av >= watch:
+            p.flags.append(f"OVER_CANNASCOPE_CT_STANDARD: total aerobic {_amount(aer)} "
+                           f">= {watch:,} CFU/g CannaScope CT Standard (LEGAL in CT; "
+                           f"Connecticut Legal Limit {alim:,.0f})")
+    for key, nice in (("coliform", "total coliform"),
                       ("btgn", "bile-tolerant gram-negative")):
         e = a.get(key)
         if not e or e.get("value") is None:
             continue
-        lim = e.get("limit") or (CT_MICRO_LIMIT if key == "aerobic" else None)
+        lim = e.get("limit")
         if lim and e["value"] > lim:
             p.flags.append(f"OVER_CT_LIMIT: {nice} {_amount(e)} > {lim:,.0f} CFU/g")
 
-    # 4. Internal contradiction -> wrongful pass
+    # 4. Internal contradiction -> a VERIFY caution (NOT a do-not-consume): the COA
+    #    text shows a FAIL/exceeds wording while the batch is marked PASS.
     if p.overall_result in ("PASS", "PASSED") and detect_internal_contradiction(text):
-        p.flags.append("WRONGFUL_PASS: a row reads FAIL/exceeds while batch marked PASS (verify)")
+        p.flags.append("VERIFY_CONTRADICTION: COA shows a FAIL/exceeds wording while "
+                       "batch marked PASS — verify against COA")
 
     # 5. Yeast & mold -- its OWN scale: > legal 100k = RED; watch..100k = YELLOW.
     tymc = a.get("tymc")
@@ -1118,14 +1150,14 @@ def _esc(s) -> str:
 def flag_severity(flag: str) -> str:
     # zero-tolerance microbiological (incl. pathogenic Aspergillus) and any
     # codified-limit exceedance -> RED do-not-consume.
-    if flag.startswith(("PROHIBITED_DETECTED", "OVER_CT_LIMIT",
-                        "MYCOTOXIN_OVER", "WRONGFUL_PASS")):
+    if flag.startswith(("PROHIBITED_DETECTED", "OVER_CT_LIMIT", "MYCOTOXIN_OVER")):
         return "RED"
-    # a contaminant detected but within its legal limit, or remediation signature
-    # -> ORANGE caution (still surfaced for sensitive consumers).
+    # a contaminant at/over the CannaScope CT Standard but within the Connecticut
+    # Legal Limit, or a remediation signature -> ORANGE caution.
     if flag.startswith(("CONTAMINANT_DETECTED", "REMEDIATION_VERIFY")):
         return "ORANGE"
-    # solvent detected within limit, or yeast&mold over the watch line -> YELLOW.
+    # over the CannaScope CT Standard (yeast/mold, aerobic), a solvent over the
+    # CannaScope CT Standard, or a verify-only contradiction -> YELLOW.
     return "YELLOW"
 
 

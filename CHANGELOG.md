@@ -15,6 +15,11 @@ All notable changes to this project are documented here.
 - Improves capitalization, font readability, spacing, table layout, and overall PDF appearance.
 - Adds or updates macOS, Windows, and Linux Version 4 run/build support.
 
+#### Version 4 refinements (2026-06-02)
+- Flagging now uses the **CannaScope CT Standard**: heavy metals, mycotoxins, and residual solvents flag only at/over 50% of the Connecticut Legal Limit (trace detections far below the limit no longer create noise); Total Aerobic Bacteria flags at/over the 10,000 CFU/g CannaScope CT Standard, like Yeast & Mold.
+- The internal-contradiction check is now a YELLOW "Verify" caution instead of RED "Do Not Consume", so nothing is marked Do Not Consume without a visible cause (a prohibited detection or an over-Connecticut-Legal-Limit result).
+- Lab-name parser recognizes Northeast Laboratories COAs that identify only as "NELabs" / nelabsct.com, and no longer mistakes COA section headers (e.g. "Stability Testing") for a lab name.
+
 ## [0.3.0] — CannaScope CT Version 3 Beta — 2026-06-02
 
 Adds proximity-to-limit reporting against BOTH the CT legal limit and a stricter
