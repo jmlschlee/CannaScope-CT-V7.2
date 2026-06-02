@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-CannaScope Beta V5
+CannaScope CT Beta V6.1
 ============================
 Connecticut Cannabis Transparency Report — Master Validation, Format, DBA, COA,
 Internet-Source, Zero-Result, and Logic-Fix build.
 
-Every flag is a LEAD, not a conclusion. CannaScope Beta V5 does not claim fraud,
+Every flag is a LEAD, not a conclusion. CannaScope CT Beta V6.1 does not claim fraud,
 unsafe product, or legal failure unless the live COA and the applicable
 Connecticut legal limit directly support that claim.
 
@@ -62,7 +62,7 @@ try:
     import cannascope_ct_v5 as v5
     import cannascope_ct_v4 as v4
 except ImportError:
-    sys.exit("CannaScope Beta V5 needs cannascope_ct_v5.py and cannascope_ct_v4.py beside it.")
+    sys.exit("CannaScope CT Beta V6.1 needs cannascope_ct_v5.py and cannascope_ct_v4.py beside it.")
 
 names = getattr(v4, "names", None)
 ProductV5 = v5.ProductV5
@@ -71,11 +71,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Public release name. (Internal development builds used "V7" naming; the
-# public-facing release is standardized as CannaScope Beta V5 — see CHANGELOG.)
-APP_NAME = "CannaScope Beta V5"
+# public-facing release is standardized as CannaScope CT Beta V6.1 — see CHANGELOG.)
+APP_NAME = "CannaScope CT Beta V6.1"
 REPORT_TITLE = "Connecticut Cannabis Transparency Report"
 REPORT_SUBTITLE = "Source-Verified Consumer Awareness & Testing Pattern Review"
-FRAMING = ("Every flag is a lead, not a conclusion. CannaScope Beta V5 does not claim "
+FRAMING = ("Every flag is a lead, not a conclusion. CannaScope CT Beta V6.1 does not claim "
            "fraud, unsafe product, or legal failure unless the live COA and the "
            "applicable Connecticut legal limit directly support that claim. Verify "
            "every product against its COA.")
@@ -88,13 +88,13 @@ FLOWER_CANN_MAX = 45.0   # max plausible cannabinoid % for FLOWER. Real flower t
                          # High-Cannabinoid FLOWER review. Concentrates/extracts are
                          # uncapped (they legitimately reach 80-90%).
 
-OUT_DIR = "CannaScope Beta V5 - Reports"
+OUT_DIR = "CannaScope CT Beta V6.1 - Reports"
 CACHE_DIR = os.path.join(OUT_DIR, "Flagged COA Source PDFs")
 REGISTRY_CACHE = os.path.join(OUT_DIR, "Registry Cache.csv")
 LEDGER = os.path.join(OUT_DIR, "Already-Scanned Skip List.txt")
 SOURCE_CACHE = os.path.join(OUT_DIR, "Source Validation Cache.json")
-REPORT_PREFIX = "CannaScope_Beta_V5_Report_"
-PUBLIC_PDF_NAME = "CannaScope_Beta_V5_Report.pdf"   # stable name copied to the working folder
+REPORT_PREFIX = "CannaScope_CT_Beta_V6_1_Report_"
+PUBLIC_PDF_NAME = "CannaScope_CT_Beta_V6_1_Report.pdf"   # stable name copied to the working folder
 REGISTRY_TTL = 6 * 3600
 
 # Live COA Match Status values
@@ -107,16 +107,27 @@ MATCH_VALUE_MISMATCH = "COA Value Mismatch"
 MATCH_MANUAL = "COA Needs Manual Review"
 PUBLISHABLE = {MATCH_EXACT, MATCH_PARTIAL}
 
-# Products that are flower-based but NOT infused (the only ones eligible for the
-# High-THC FLOWER abnormality review). Infused / extract products are reviewed
-# separately as a potency reference, not as a flower abnormality.
-INFUSED_MARKERS = ("infused", "hash infused", "bubble hash", "thca infused",
-                   "vape", "cartridge", "pod", "rosin", "resin", "badder", "sauce",
-                   "concentrate", "extract", "live resin", "live rosin",
-                   "marijuana extract for inhalation", "mix infused", "distillate",
-                   "diamond", "blunt")
-NONINFUSED_FORM_FLOWER = ("flower", "usable marijuana", "plant material",
-                          "raw material", "shake", "ground flower", "bud")
+# THREE distinct product categories for the cannabinoid review. Vapes /
+# concentrates / extracts are NEVER lumped in with infused products.
+#   flower  = NON-infused flower: whole flower, usable marijuana, shake, smalls,
+#             and plain (non-infused) pre-rolls / joints / blunts.
+#   infused = INFUSED flower products: infused joints / blunts / pre-rolls, hash-
+#             holes, THCA-/diamond-/rosin-infused flower (flower + added concentrate).
+#   extract = vapes, cartridges, pods, disposables, and concentrates / extracts
+#             (rosin, resin, wax, shatter, distillate, diamonds, hash, kief...).
+#   other   = edibles, tinctures, topicals, capsules, beverages (not reviewed).
+ORAL_TOPICAL = ("edible", "gummy", "gummies", "tincture", "topical", "capsule",
+                "tablet", "lozenge", "beverage", "drink", "syrup", "sublingual",
+                "suppository", "patch", "cream", "balm", "lotion", "troche",
+                "softgel", "chocolate", " mint")
+VAPE_KEYWORDS = ("vape", "vaporizer", "cartridge", "cart", "disposable", "pod",
+                 "510", "all-in-one", "aio", "pax")
+CONCENTRATE_KEYWORDS = ("rosin", "resin", "wax", "shatter", "badder", "budder",
+                        "crumble", "sauce", "diamond", "distillate", "kief", "dab",
+                        "hash", "live")
+FLOWER_FORM = ("flower", "usable marijuana", "plant material", "raw material",
+               "shake", "ground flower", "bud", "smalls", "mini flower", "flower mini")
+PREROLL_KEYWORDS = ("pre-roll", "preroll", "pre roll", "joint", "blunt", "hash hole")
 
 
 # ============================================================================
@@ -239,32 +250,46 @@ def _hay(p):
     return f"{p.dosage_form} {p.product_name}".lower()
 
 
-def is_infused(p) -> bool:
-    h = _hay(p)
-    return any(k in h for k in INFUSED_MARKERS)
+def product_category(p) -> str:
+    """Classify into 'flower' | 'infused' | 'extract' | 'other'. Vapes / extracts
+    are kept STRICTLY separate from infused flower products."""
+    name = (p.product_name or "").lower()
+    form = (p.dosage_form or "").lower()
+    # Oral/topical is judged from the DOSAGE FORM only — strain names are full of
+    # food words ("Velvet Cream", "Wedding Cake", "Mint Chocolate") that must not
+    # be mistaken for edibles/topicals.
+    if any(k in form for k in ORAL_TOPICAL):
+        return "other"
+    preroll = any(k in name for k in PREROLL_KEYWORDS)
+    # INFUSED flower product = a flower-format item with added concentrate:
+    # anything that says "infused", or a pre-roll/joint/blunt that also carries a
+    # concentrate marker (hash hole, diamond/rosin/resin/live-infused pre-roll).
+    if ("infused" in name
+            or (preroll and any(k in name for k in
+                                ("hash", "rosin", "resin", "diamond", "live", "kief")))):
+        return "infused"
+    if any(k in name for k in VAPE_KEYWORDS):
+        return "extract"
+    if any(k in name for k in CONCENTRATE_KEYWORDS):
+        return "extract"
+    if any(k in form for k in FLOWER_FORM) or any(k in name for k in FLOWER_FORM) or preroll:
+        return "flower"
+    if "extract for inhalation" in form or "concentrate" in form:
+        return "extract"
+    return "other"
 
 
 def is_noninfused_flower(p) -> bool:
-    """Eligible for High-THC FLOWER abnormality review: flower-based AND not
-    infused / not a vape / concentrate / extract."""
-    if is_infused(p):
-        return False
-    form = (p.dosage_form or "").lower()
-    name = (p.product_name or "").lower()
-    if any(k in form for k in NONINFUSED_FORM_FLOWER):
-        return True
-    # non-infused pre-rolls / mini pre-rolls (name carries pre-roll, infused already excluded)
-    if ("pre-roll" in name or "preroll" in name or "pre roll" in name) and "infused" not in name:
-        return True
-    if any(k in name for k in ("flower minis", "flower mini", "smalls", "ground flower", "shake")):
-        return True
-    return False
+    """True only for NON-infused flower (the High-Cannabinoid FLOWER review set)."""
+    return product_category(p) == "flower"
 
 
-def is_infused_or_extract(p) -> bool:
-    """Eligible for the Infused / Extract Potency Reference section."""
-    return is_infused(p) or v5.is_thc_flower(p) is False and any(
-        k in _hay(p) for k in ("extract", "concentrate", "vape", "cartridge"))
+def is_infused(p) -> bool:
+    return product_category(p) == "infused"
+
+
+def is_extract(p) -> bool:
+    return product_category(p) == "extract"
 
 
 # ============================================================================
@@ -573,24 +598,41 @@ def validate_coa_row(p, text) -> str:
     name_tokens = [t for t in re.split(r"[^a-z0-9]+", src)
                    if len(t) >= 3 and t not in _COA_STOP and not t.isdigit()]
     name_ok = reg_ok or (any(t in low for t in name_tokens) if name_tokens else False)
-    # value check: a flagged measured value appears (tolerant of number formatting)
+    # PER-LINE-ITEM verification (anti-hallucination): every flagged value must
+    # literally appear in the COA text. Any value that does NOT is marked
+    # `_coa_unverified` on its analyte entry, which makes is_quantified() reject it
+    # so it can never become a published finding (it falls to manual review). This
+    # is the single chokepoint that keeps an OCR/parse hallucination off the report.
+    def _value_in_text(v):
+        if v is None:
+            return False
+        if v == int(v):
+            forms = {f"{int(v)}", f"{int(v):,}"}
+        else:
+            forms = {f"{v:g}"} | {f"{v:.{pr}f}".rstrip("0").rstrip(".") for pr in (1, 2, 3, 4)}
+        # match each form only as a DISTINCT number (no adjacent digit), so 0.5 does
+        # not "match" inside 0.18 or 10.52 — that loose match is how hallucinations slip in.
+        return any(f and re.search(r"(?<![\d.])" + re.escape(f) + r"(?![\d])", text)
+                   for f in forms)
+
     qd = [d for d in v5.quantified_details(p, p._watch) if v5.is_flag_driver(d)]
-    val_ok = True
-    if qd:
-        val_ok = False
-        for d in qd:
-            v = d.get("value")
-            if v is None:
-                continue
-            cands = {f"{v:g}", f"{int(round(v))}", f"{v:,.0f}", f"{v:.1f}", f"{v:.2f}"}
-            if any(c and c in text for c in cands):
-                val_ok = True
-                break
+    val_ok = False
+    changed = False
+    for d in qd:
+        if _value_in_text(d.get("value")):
+            val_ok = True
+        elif d["key"] in p.analytes:          # not in the COA -> do not trust this line
+            p.analytes[d["key"]]["_coa_unverified"] = True
+            changed = True
+    if not qd:
+        val_ok = True
+    if changed:                                # invalidate the cached details so the
+        p._qd_cache = None                     # _coa_unverified flags take effect
     if name_ok:
         return MATCH_EXACT            # product confirmed in the COA -> Verified
     if val_ok:
-        return MATCH_PARTIAL          # value confirmed, product name not textual -> Partial
-    return MATCH_PRODUCT_MISMATCH     # neither found -> substantive mismatch -> queue
+        return MATCH_PARTIAL          # at least one value confirmed; name not textual
+    return MATCH_PRODUCT_MISMATCH     # neither product nor any value found -> queue
 
 
 # ============================================================================
@@ -603,7 +645,8 @@ def validate_coa_row(p, text) -> str:
 _OCR_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cannascope_ocr_worker.py")
 _OCR_SEM = threading.Semaphore(4)
 _OCR_LOCK = threading.Lock()
-_OCR_STATS = {"ok": 0, "crashes": 0, "timeouts": 0}
+_OCR_STATS = {"ok": 0, "crashes": 0, "timeouts": 0, "backoffs": 0}
+_CPU = os.cpu_count() or 4
 
 
 def set_ocr_concurrency(n: int):
@@ -611,11 +654,39 @@ def set_ocr_concurrency(n: int):
     _OCR_SEM = threading.Semaphore(max(1, int(n)))
 
 
+def _system_overloaded() -> bool:
+    """Predictive overload check. Uses psutil (CPU+memory) when available, else the
+    Unix load average. True = the machine is too busy to safely start more work."""
+    try:
+        import psutil
+        if psutil.virtual_memory().percent > 92:
+            return True
+        return psutil.cpu_percent(interval=0.0) > 92
+    except Exception:
+        try:
+            return os.getloadavg()[0] > _CPU * 1.5
+        except (OSError, AttributeError):
+            return False
+
+
+def _adaptive_backoff():
+    """Take its time when the machine is overloaded; proceed at once when it's free.
+    This is what lets a massive run never tip into a crash — it self-paces."""
+    waited = 0.0
+    while _system_overloaded() and waited < 30.0:
+        if waited == 0.0:
+            with _OCR_LOCK:
+                _OCR_STATS["backoffs"] += 1
+        time.sleep(1.0)
+        waited += 1.0
+
+
 def _isolated_ocr_pdf(src, max_pages: int = 6) -> str:
     """OCR one COA in a separate process. Segfault/timeout/error -> '' (the COA is
     treated as unreadable and retried later) instead of taking down the scan."""
     if not isinstance(src, str) or not os.path.exists(_OCR_WORKER):
         return ""
+    _adaptive_backoff()
     for timeout in (120, 300):          # retry once with a longer timeout if overloaded
         try:
             with _OCR_SEM:
@@ -848,12 +919,22 @@ def self_audit(all_results, flagged, thc_flower, infused_potency, rows_for_pub, 
 # PDF
 # ============================================================================
 def next_report_path(status):
+    """Reports are NEVER overwritten or erased. Each gets a unique name:
+        <PREFIX><N>[_DRAFT]_MM_DD_YYYY.pdf
+    where N is sequential starting at 1 (one greater than the highest existing
+    report number found in BOTH the output folder and the working folder), and the
+    date is the creation day. Scanning both folders makes the sequence robust even
+    if one folder is cleared."""
     import glob
-    nums = [int(m.group(1)) for f in glob.glob(os.path.join(OUT_DIR, REPORT_PREFIX + "*.pdf"))
-            for m in [re.search(r"_(\d+)\.pdf$", f)] if m]
+    date = datetime.date.today().strftime("%m_%d_%Y")
+    dirs = {OUT_DIR, os.path.dirname(os.path.abspath(OUT_DIR))}
+    rx = re.compile(re.escape(REPORT_PREFIX) + r"(\d+)")
+    nums = [int(m.group(1)) for d in dirs
+            for f in glob.glob(os.path.join(d, REPORT_PREFIX + "*.pdf"))
+            for m in [rx.search(os.path.basename(f))] if m]
     n = (max(nums) + 1) if nums else 1
     tag = "_DRAFT" if status in ("DRAFT", "FAIL") else ""
-    return os.path.join(OUT_DIR, f"{REPORT_PREFIX}{n}{tag}.pdf"), n
+    return os.path.join(OUT_DIR, f"{REPORT_PREFIX}{n}{tag}_{date}.pdf"), n
 
 
 def build_pdf(out_path, report_no, ctx):
@@ -1169,19 +1250,31 @@ def build_pdf(out_path, report_no, ctx):
     else:
         story.append(Paragraph("No non-infused flower exceeded the 35% review threshold in this run.", cellc))
 
-    # ---------------- INFUSED & EXTRACT POTENCY COMPARISON REFERENCE ----------------
-    story.append(H("Infused & Extract Potency Comparison Reference", color=PURPLE))
-    story.append(Paragraph("This section exists to compare concentrated products (infused pre-rolls, hash/THCA-infused "
-                           "items, vapes, concentrates, extracts) against normal flower. High potency here is expected "
-                           "by design — reference only, NOT a flower abnormality.", CTX))
-    rows = [[Paragraph(esc(tcase(p.product_name)), cell), td(p), Paragraph(pr(p), cell),
-             Paragraph(esc(lab_name(p, lmap)), cell), Paragraph(f'{val:g}%', cellc), Paragraph(coa(p), cellc)]
-            for (p, key, val) in ctx["infused_potency"][:40]]
-    if rows:
-        story.append(tbl(["Product", "Testing Date", "Producer", "Lab", "Highest Cannabinoid %", "COA"], rows,
-                         [2.9*inch, 0.95*inch, 2.4*inch, 1.7*inch, 1.7*inch, 1.15*inch], hc=PURPLE, band="#ead9f2"))
-    else:
-        story.append(Paragraph("No infused / extract products reached the 35% reference threshold.", cellc))
+    # ---------------- POTENCY REFERENCE: INFUSED (separate from vapes/extracts) ----------------
+    def _potency_section(title, blurb, items):
+        story.append(H(title, color=PURPLE))
+        story.append(Paragraph(blurb, CTX))
+        rows = [[Paragraph(esc(tcase(p.product_name)), cell), td(p), Paragraph(pr(p), cell),
+                 Paragraph(esc(tcase(p.dosage_form)), cell), Paragraph(esc(lab_name(p, lmap)), cell),
+                 Paragraph(f'{val:g}%', cellc), Paragraph(coa(p), cellc)] for (p, key, val) in items[:40]]
+        if rows:
+            story.append(tbl(["Product", "Testing Date", "Producer", "Product Type", "Lab",
+                              "Highest Cannabinoid %", "COA"], rows,
+                             [2.7*inch, 0.9*inch, 2.2*inch, 1.5*inch, 1.5*inch, 1.5*inch, 1.1*inch],
+                             hc=PURPLE, band="#ead9f2"))
+        else:
+            story.append(Paragraph("None reached the 35% reference threshold in this run.", cellc))
+
+    _potency_section("Infused Products — Potency Reference",
+                     "Infused FLOWER products only — infused joints, blunts, and pre-rolls (flower with added "
+                     "concentrate). High potency is expected by design — reference only, not a flower abnormality. "
+                     "Vapes / concentrates / extracts are NOT included here; they have their own section below.",
+                     ctx["infused_potency"])
+    _potency_section("Vapes, Concentrates & Extracts — Potency Reference",
+                     "Vape cartridges, disposables, pods, and concentrates / extracts (rosin, resin, distillate, "
+                     "diamonds, hash, etc.). High potency is expected by design — reference only. These are a "
+                     "separate product class from infused flower products.",
+                     ctx["extract_potency"])
 
     # ---------------- POSSIBLE REMEDIATION REVIEW ----------------
     if ctx["remediation"]:
@@ -1312,7 +1405,7 @@ def write_outputs(ctx):
                 test_date(p), lab_name(p, lmap), p._coa_status, p.registration_number, p.report_url]
 
     # validated flagged products
-    _w(P("CannaScope_CT_Beta_V7_Validated_Flagged.csv"),
+    _w(P("CannaScope_CT_Beta_V6_1_Validated_Flagged.csv"),
        ["product", "producer_dba", "type", "date", "lab", "coa_match_status", "coa", "report_url",
         "severity"],
        [row(p) + [v5.report_severity(p, watch) or ""] for p in ctx["flagged"] if p._coa_status in PUBLISHABLE])
@@ -1336,12 +1429,14 @@ def write_outputs(ctx):
          lab_name(p, lmap), key, f"{val:g}", f"{val-THC_REVIEW_PCT:.1f}", p.registration_number,
          p.report_url, p._coa_status] for i, (p, key, val) in enumerate(ctx["thc_flower"], 1)])
 
-    # infused/extract potency reference
-    _w(P("infused_extract_potency_reference.csv"),
-       ["product", "producer_dba", "type", "lab", "highest_cannabinoid_pct", "coa", "report_url"],
-       [[tcase(p.product_name), ident.resolve(p.producer)["label"], tcase(p.dosage_form),
-         lab_name(p, lmap), f"{val:g}", p.registration_number, p.report_url]
-        for (p, key, val) in ctx["infused_potency"]])
+    # potency references — infused and vape/extract kept in SEPARATE files
+    for fn, items in (("infused_products_potency.csv", ctx["infused_potency"]),
+                      ("vape_concentrate_extract_potency.csv", ctx["extract_potency"])):
+        _w(P(fn),
+           ["product", "producer_dba", "type", "lab", "highest_cannabinoid_pct", "coa", "report_url"],
+           [[tcase(p.product_name), ident.resolve(p.producer)["label"], tcase(p.dosage_form),
+             lab_name(p, lmap), f"{val:g}", p.registration_number, p.report_url]
+            for (p, key, val) in items])
 
     # COA verification queue
     _w(P("coa_verification_queue.csv"),
@@ -1369,7 +1464,7 @@ def write_outputs(ctx):
     json.dump(ctx["debug"], open(P("debug_log.json"), "w"), indent=2)
 
     # plain-text executive summary
-    with open(P("CannaScope_CT_Beta_V7_Executive_Summary.txt"), "w") as f:
+    with open(P("CannaScope_CT_Beta_V6_1_Executive_Summary.txt"), "w") as f:
         f.write(f"{APP_NAME}\n{REPORT_TITLE}\n" + "=" * 78 + "\n")
         f.write("VALIDATION STATUS: " + ctx["status"] + "\n")
         f.write(FRAMING + "\n\n")
@@ -1558,22 +1653,28 @@ def main():
     solvs = solvent_rows(pub)
     paths = pathogen_rows(pub)
 
-    # high-THC non-infused flower vs infused/extract potency
-    thc_flower, infused_potency = [], []
+    # Cannabinoid review split into THREE separate buckets: non-infused flower,
+    # infused flower products, and vapes/concentrates/extracts (never combined).
+    thc_flower, infused_potency, extract_potency = [], [], []
     implausible_flower = 0
     for p in pub:
         rv = thc_review_value(p)
         if not rv or rv[1] <= THC_REVIEW_PCT:
             continue
-        if is_noninfused_flower(p):
+        cat = product_category(p)
+        if cat == "flower":
             if rv[1] <= FLOWER_CANN_MAX:
                 thc_flower.append((p, rv[0], rv[1]))
             else:
                 implausible_flower += 1   # >45% on flower = parse error / mislabeled, excluded
-        else:
+        elif cat == "infused":
             infused_potency.append((p, rv[0], rv[1]))
+        elif cat == "extract":
+            extract_potency.append((p, rv[0], rv[1]))
+        # 'other' (edibles/tinctures/etc.) -> not part of the cannabinoid review
     thc_flower.sort(key=lambda t: t[2], reverse=True)
     infused_potency.sort(key=lambda t: t[2], reverse=True)
+    extract_potency.sort(key=lambda t: t[2], reverse=True)
 
     # remediation + cleaner
     remediation = [p for p in all_results if is_noninfused_flower(p)
@@ -1667,13 +1768,14 @@ def main():
         "unreadable_after_retry": len(failures),
         "ocr_recovered_on_retry": ocr_recovered,
         "ocr_ok": _OCR_STATS["ok"], "ocr_native_crashes_isolated": _OCR_STATS["crashes"],
-        "ocr_timeouts": _OCR_STATS["timeouts"],
+        "ocr_timeouts": _OCR_STATS["timeouts"], "overload_backoffs": _OCR_STATS["backoffs"],
         "flagged_total": len(flagged),
         "flagged_published": len(pub),
         "coa_verification_queue": len(flagged) - len(pub),
         "high_thc_noninfused_flower": len(thc_flower),
         "implausible_flower_potency_excluded": implausible_flower,
-        "infused_extract_potency_ref": len(infused_potency),
+        "infused_potency_ref": len(infused_potency),
+        "vape_concentrate_extract_potency_ref": len(extract_potency),
         "potency_parser_conflicts": sum(1 for p in all_results if thc_conflict(p)),
         "zero_result_draft_warnings": sum(1 for c in zero if c["status"] == "DRAFT WARNING"),
         "self_audit_remaining_issues": len(remaining),
@@ -1686,7 +1788,8 @@ def main():
                flagged=flagged, exec_rows=exec_rows, audit=audit, queue=queue,
                producer_rows=producer_rows, lab_rows=lab_rows, analyte_items=analyte_items,
                pesticides=pests, solvents=solvs, mycotoxins=mycos, pathogens=paths,
-               thc_flower=thc_flower, infused_potency=infused_potency, remediation=remediation,
+               thc_flower=thc_flower, infused_potency=infused_potency,
+               extract_potency=extract_potency, remediation=remediation,
                cleaner=cleaner, cleaner_review=cleaner_review, zero=zero, debug=debug,
                n_reviewed=len(all_results), n_pub=len(pub), n_queue=len(flagged)-len(pub),
                n_red=sev_counts.get("RED", 0), n_org=sev_counts.get("ORANGE", 0),
@@ -1697,14 +1800,15 @@ def main():
     build_pdf(out_path, report_no, ctx)
 
     import shutil
-    visible = os.path.join(os.path.dirname(os.path.abspath(OUT_DIR)), PUBLIC_PDF_NAME)
+    # copy to the working folder under the SAME unique name (never overwrites)
+    visible = os.path.join(os.path.dirname(os.path.abspath(OUT_DIR)), os.path.basename(out_path))
     try:
         shutil.copy2(out_path, visible)
     except OSError:
         visible = out_path
 
     print("\n" + "=" * 74)
-    print(f"  CANNASCOPE BETA V5 — REPORT #{report_no} [{status}] IS READY")
+    print(f"  CANNASCOPE CT BETA V6.1 — REPORT #{report_no} [{status}] IS READY")
     print(f"    {visible}")
     print(f"  Reviewed {len(all_results):,} • Published {len(pub):,} "
           f"({sev_counts.get('RED',0)} Red, {sev_counts.get('ORANGE',0)} Orange, "

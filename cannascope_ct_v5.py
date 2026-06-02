@@ -632,6 +632,8 @@ def is_quantified(e) -> bool:
     the classic two-column-COA parsing artifact)."""
     if not e:
         return False
+    if e.get("_coa_unverified"):     # value not found in the live COA -> not trusted
+        return False
     v = e.get("value")
     if v is None or v <= 0:
         return False
@@ -646,6 +648,13 @@ def is_quantified(e) -> bool:
     if (lim and abs(v - lim) <= max(1e-9, abs(lim) * 1e-6)
             and (e.get("status") or "").upper() == "DETECTED"):
         return False   # value == its own limit + only DETECTED -> misparsed limit
+    # implausible magnitude -> almost certainly an OCR/parse error (e.g. a scanned
+    # COA misread "5,088,888,888,888 CFU/g"), NOT a real result. Reject it so it
+    # never produces a finding. A genuine gross failure (a few x the limit) is kept.
+    if lim and lim > 0 and v > lim * 1000:
+        return False
+    if v > 1e9:
+        return False
     return True
 
 
