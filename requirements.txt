@@ -1,4 +1,4 @@
-# CannaScope CT — V2  (this repo's current version)
+# CannaScope CT — Version 3 Beta
 # Core:
 requests==2.34.2
 reportlab==4.5.1
@@ -12,6 +12,8 @@ ocrmac==1.0.1 ; sys_platform == 'darwin'
 pytesseract==0.3.13 ; sys_platform != 'darwin'
 
 # ---------------------------------------------------------------------------
-# The older Beta V1 script (connecticut_cannabis_contaminant_checker_beta_v1.py)
-# instead needs:  pip install requests pdfplumber reportlab
-# (V1 remains available as a tagged release for anyone who wants it.)
+# V3 also ships ct_cannabis_names.py (producer/lab name resolution) and an
+# optional dba_overrides.csv — keep them in the same folder as the script.
+# Older versions remain available as tagged releases:
+#   V2 .......... requests reportlab pypdfium2
+#   Beta V1 ..... requests pdfplumber reportlab

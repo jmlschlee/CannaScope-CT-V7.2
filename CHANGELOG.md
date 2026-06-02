@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] — CannaScope CT Version 3 Beta — 2026-06-02
+
+Adds proximity-to-limit reporting against BOTH the CT legal limit and a stricter
+**CannaScope CT limit**, plus much clearer output. V2 and Beta V1 remain available
+and unchanged as tagged releases.
+
+### Added / changed
+- **% of CT Legal Limit** and **% of CannaScope CT Limit** columns for every
+  contaminant that has a limit, color-coded by proximity (>=90% dark red,
+  75-89.9% orange, 50-74.9% yellow). Computed dynamically per COA.
+- **Executive Summary page** — "Products Closest to the Limits," ranked by % of
+  limit reached, showing measured value, CT legal limit, and CannaScope CT limit.
+- **Recognizable producer names**: common / DBA name + legal LLC (e.g.
+  "Fine Fettle (FFD 149 LLC)", "Theraplant (DXR Finance 3, LLC)"), plus the
+  product brand parsed from the COA, via the new `ct_cannabis_names.py` module and
+  optional `dba_overrides.csv`. Lab names normalized.
+- **Reads Northeast Laboratories' columnar COAs** — recovers yeast/mold & aerobic
+  counts earlier versions could not parse.
+- **Per-Lab Analysis Summary** and a **name coverage audit** so every lab and
+  producer is accounted for each run.
+- **Clearer, wider report layout** (legal landscape, larger type) and the numbered
+  report is also written to the top of the run folder for easy access.
+- **Default look-back is now 60 days** (use `--days` to widen/narrow).
+
 ## [0.2.0] — CannaScope CT V2 — 2026-06-02
 
 Renamed to **CannaScope CT** and substantially upgraded. The Beta V1 release
