@@ -1,5 +1,20 @@
 # CannaScope CT Beta Version 4
 
+## ⬇️ Download — CannaScope CT Beta 4 (latest)
+
+Pick your operating system. Each is a self-contained package (unzip and run).
+
+| Operating system | Download |
+|---|---|
+| 🪟 **Windows** | **[CannaScope-CT-V4-windows.zip](https://github.com/jmlschlee/CannaScope-CT-Beta-4/releases/latest/download/CannaScope-CT-V4-windows.zip)** |
+| 🍎 **macOS** | **[CannaScope-CT-V4-macos.zip](https://github.com/jmlschlee/CannaScope-CT-Beta-4/releases/latest/download/CannaScope-CT-V4-macos.zip)** |
+| 🐧 **Linux** | **[CannaScope-CT-V4-linux.zip](https://github.com/jmlschlee/CannaScope-CT-Beta-4/releases/latest/download/CannaScope-CT-V4-linux.zip)** |
+
+All builds (and older versions) are on the **[Releases page](https://github.com/jmlschlee/CannaScope-CT-Beta-4/releases)**. See **[INSTALL.md](INSTALL.md)** for step-by-step setup.
+
+---
+
+
 **A consumer-awareness tool for Connecticut cannabis.** CannaScope CT pulls
 Connecticut's public cannabis product registry, opens **every** product's lab
 Certificate of Analysis (COA) across **all producers and all CT labs**, extracts
@@ -104,7 +119,7 @@ python cannascope_ct_v4.py --threshold 5000   # stricter CannaScope CT Standard 
 
 Every flag is a LEAD to verify against the source COA — click the COA number in
 any row to open the official COA and confirm. Found a misread? Please report it:
-https://github.com/jmlschlee/Connecticut-Cannabis-Contaminant-Checker-Beta-V1/issues
+https://github.com/jmlschlee/CannaScope-CT-Beta-4/issues
 
 Earlier versions remain available, unchanged: **V3** (`v0.3.0`), **V2**
 (`v0.2.0`), and the original **Beta V1** (`v0.1.0-beta`).
