@@ -1,20 +1,24 @@
-# CannaScope CT Beta Version 4
-# Core:
+# CannaScope CT V7.2 — dependencies
+# Core (required):
 requests==2.34.2
 reportlab==4.5.1
 pypdfium2==5.8.0
+pdfplumber==0.11.4
 Pillow==12.2.0
 
-# OCR — lets the tool read scanned/image-only COAs (recommended).
-#   macOS uses Apple Vision via ocrmac (no extra system install needed).
-#   Other systems use tesseract (also `apt install tesseract-ocr` etc.).
+# OCR — lets the tool read scanned / image-only COAs (recommended).
+#   macOS:        Apple Vision via ocrmac (no extra system install needed).
+#   Windows/Linux: Tesseract — also install the tesseract binary itself:
+#       Windows -> https://github.com/UB-Mannheim/tesseract/wiki
+#       Linux   -> sudo apt install tesseract-ocr   (or your distro's package)
 ocrmac==1.0.1 ; sys_platform == 'darwin'
 pytesseract==0.3.13 ; sys_platform != 'darwin'
 
+# Optional but recommended: sharper memory/CPU overload backoff so very large,
+# multi-year OCR runs slow down BEFORE they can crash (never miss a document).
+psutil>=5.9
+
 # ---------------------------------------------------------------------------
-# Version 4 also ships ct_cannabis_names.py (producer/lab name resolution) and an
-# optional dba_overrides.csv — keep them in the same folder as the script.
-# Older versions remain available as tagged releases:
-#   V3 .......... requests reportlab pypdfium2 (+ ocrmac/pytesseract)
-#   V2 .......... requests reportlab pypdfium2
-#   Beta V1 ..... requests pdfplumber reportlab
+# V7.2 is a SINGLE self-contained file (CannaScope_CT_V7_2.py) — the V4 engine,
+# V5 cannabinoid/identity layer, name resolver, and OCR worker are all embedded.
+# No companion .py files are required. Older versions remain as tagged releases.
