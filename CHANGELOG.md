@@ -2,7 +2,31 @@
 
 All notable changes to this project are documented here.
 
-## [9.1.0-beta] — CannaScope CT Beta V9.1 — current release
+## [10.0.0-beta] — 2026-06-03 — CannaScope CT Beta V10 — current release (pre-release)
+
+Additive release. All prior versions remain live and downloadable, unchanged. Repository
+renamed to `CannaScope-CT` (stable name; GitHub redirect from the old name preserved — the
+release, not the repo, now carries the version).
+
+### Added
+- **Patient-Reported Product Concern — Personalized Analysis PDF** (`patient-concern`
+  subcommand). On-demand single-product report: resolves the product against the CT registry +
+  its COA from any identifiers (name, batch, NDC, UID/BioTrack lot, COA #, dates, QR/COA link),
+  runs the near-/over-limit + statute/regulatory-flag logic, surfaces identifier discrepancies,
+  and links related/sibling COAs from the same producer (same strain + form, closest in time)
+  with live clickable COA links so a patient can compare batches. Output to
+  `output/patient_concerns/`; never overwrites. Advisory / non-diagnostic / not medical advice.
+- Self-contained `CannaScope_CT_Beta_V10.py` + modular `cannascope_ct_v10.py` + `_make_v10.py`.
+- Windows / macOS / Linux download bundles.
+
+### Carried forward from V9.1 (unchanged)
+- "Potential Statute & Regulatory Flags to Evaluate" and "CT Cannabis Ombudsman — Medical
+  Patient Safety Review" PDF sections, with COA dates + clickable COA links.
+- Multi-lab COA-parsing accuracy work; offline source bundle; numbered never-overwrite reports.
+- The broader Compliance Screening + Environmental Linkage engines remain reserved/dormant
+  (present in-code, not wired).
+
+## [9.1.0-beta] — CannaScope CT Beta V9.1
 
 Consolidation point release of the V9 line. Additive: all prior releases remain live and
 downloadable, unchanged. Repository renamed to `CannaScope-CT-Beta-V9.1` to match.
