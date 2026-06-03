@@ -3,8 +3,10 @@ name: Build CannaScope CT executables
 # Builds a single-file executable for Windows, macOS, and Linux whenever you push
 # a tag like v0.2.0, and attaches them to the matching GitHub Release.
 on:
-  push:
-    tags: ["v*"]
+  # Manual-only. The former "push: tags" trigger auto-built PyInstaller binaries
+  # from an older source file and attached them to every release, producing stale /
+  # version-mismatched assets. Disabled to avoid that; releases are published
+  # directly with the correct self-contained build. Re-enable deliberately if needed.
   workflow_dispatch:
 
 permissions:
