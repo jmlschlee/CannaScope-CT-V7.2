@@ -66,11 +66,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V15.1"
+APP_NAME = "CannaScope CT V15.1.1"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "15.1"
+SOFTWARE_VERSION = "15.1.1"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 
 # ============================================================================
@@ -1863,7 +1863,7 @@ LEGAL_SOURCES = {
     "_general": [
         ("CT eRegulations (DCP cannabis testing)", "https://eregulations.ct.gov/eRegsPortal/Search/home"),
         ("CT General Statutes (cga.ct.gov)", "https://www.cga.ct.gov/current/pub/chap_420h.htm"),
-        ("CT DCP cannabis program", "https://portal.ct.gov/dcp/drug-control-division/drug-control/connecticut-medical-marijuana-program"),
+        ("CT DCP cannabis program", "https://portal.ct.gov/cannabis/medical-marijuana-program"),
     ],
 }
 
@@ -1892,17 +1892,109 @@ def _legal_era(date):
     return date[0] if (date and len(date) == 3 and date[0]) else "unknown"
 
 
-def _fetch_url_safe(url, session=None, timeout=8, _seen=None):
-    """Best-effort live GET, deduped per run via _seen. Returns (ok, note). NEVER raises."""
+# GoDaddy "Secure Certificate Authority - G2" intermediate. Several CT .gov hosts on GoDaddy
+# (notably www.cga.ct.gov) serve their leaf cert WITHOUT this intermediate, so a standard client
+# can't build the chain up to the GoDaddy Root G2 (which IS trusted) and verification fails with
+# "unable to get local issuer certificate". We supply the missing intermediate so the chain
+# verifies WITH verification still ON — we are completing the chain the server should have sent,
+# not disabling any security check. Valid to 2031-05-03; chains to GoDaddy Root G2.
+_GODADDY_G2_INTERMEDIATE_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIE0DCCA7igAwIBAgIBBzANBgkqhkiG9w0BAQsFADCBgzELMAkGA1UEBhMCVVMx
+EDAOBgNVBAgTB0FyaXpvbmExEzARBgNVBAcTClNjb3R0c2RhbGUxGjAYBgNVBAoT
+EUdvRGFkZHkuY29tLCBJbmMuMTEwLwYDVQQDEyhHbyBEYWRkeSBSb290IENlcnRp
+ZmljYXRlIEF1dGhvcml0eSAtIEcyMB4XDTExMDUwMzA3MDAwMFoXDTMxMDUwMzA3
+MDAwMFowgbQxCzAJBgNVBAYTAlVTMRAwDgYDVQQIEwdBcml6b25hMRMwEQYDVQQH
+EwpTY290dHNkYWxlMRowGAYDVQQKExFHb0RhZGR5LmNvbSwgSW5jLjEtMCsGA1UE
+CxMkaHR0cDovL2NlcnRzLmdvZGFkZHkuY29tL3JlcG9zaXRvcnkvMTMwMQYDVQQD
+EypHbyBEYWRkeSBTZWN1cmUgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IC0gRzIwggEi
+MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC54MsQ1K92vdSTYuswZLiBCGzD
+BNliF44v/z5lz4/OYuY8UhzaFkVLVat4a2ODYpDOD2lsmcgaFItMzEUz6ojcnqOv
+K/6AYZ15V8TPLvQ/MDxdR/yaFrzDN5ZBUY4RS1T4KL7QjL7wMDge87Am+GZHY23e
+cSZHjzhHU9FGHbTj3ADqRay9vHHZqm8A29vNMDp5T19MR/gd71vCxJ1gO7GyQ5HY
+pDNO6rPWJ0+tJYqlxvTV0KaudAVkV4i1RFXULSo6Pvi4vekyCgKUZMQWOlDxSq7n
+eTOvDCAHf+jfBDnCaQJsY1L6d8EbyHSHyLmTGFBUNUtpTrw700kuH9zB0lL7AgMB
+AAGjggEaMIIBFjAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAdBgNV
+HQ4EFgQUQMK9J47MNIMwojPX+2yz8LQsgM4wHwYDVR0jBBgwFoAUOpqFBxBnKLbv
+9r0FQW4gwZTaD94wNAYIKwYBBQUHAQEEKDAmMCQGCCsGAQUFBzABhhhodHRwOi8v
+b2NzcC5nb2RhZGR5LmNvbS8wNQYDVR0fBC4wLDAqoCigJoYkaHR0cDovL2NybC5n
+b2RhZGR5LmNvbS9nZHJvb3QtZzIuY3JsMEYGA1UdIAQ/MD0wOwYEVR0gADAzMDEG
+CCsGAQUFBwIBFiVodHRwczovL2NlcnRzLmdvZGFkZHkuY29tL3JlcG9zaXRvcnkv
+MA0GCSqGSIb3DQEBCwUAA4IBAQAIfmyTEMg4uJapkEv/oV9PBO9sPpyIBslQj6Zz
+91cxG7685C/b+LrTW+C05+Z5Yg4MotdqY3MxtfWoSKQ7CC2iXZDXtHwlTxFWMMS2
+RJ17LJ3lXubvDGGqv+QqG+6EnriDfcFDzkSnE3ANkR/0yBOtg2DZ2HKocyQetawi
+DsoXiWJYRBuriSUBAA/NxBti21G00w9RKpv0vHP8ds42pM3Z2Czqrpv1KrKQ0U11
+GIo/ikGQI31bS/6kA1ibRrLDYGCD+H1QQc7CoZDDu+8CL9IVVO5EFdkKrqeKM+2x
+LXY2JtwE65/3YR8V3Idv7kaWKK2hJn0KCacuBKONvPi8BDAB
+-----END CERTIFICATE-----
+"""
+
+_CA_BUNDLE_PATH = None
+
+
+def _ca_bundle():
+    """Path to a CA bundle = certifi's roots + the GoDaddy G2 intermediate, so CT hosts that omit
+    the intermediate still verify with verification ON. Built once per run; on any error falls back
+    to certifi's bundle, then to requests' default (returns "") — a fetch never crashes over this."""
+    global _CA_BUNDLE_PATH
+    if _CA_BUNDLE_PATH is not None:
+        return _CA_BUNDLE_PATH
+    try:
+        import certifi, tempfile
+        base = open(certifi.where(), encoding="utf-8").read()
+        fd, path = tempfile.mkstemp(suffix="-cannascope-cabundle.pem")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(base)
+            if not base.endswith("\n"):
+                f.write("\n")
+            f.write(_GODADDY_G2_INTERMEDIATE_PEM.strip() + "\n")
+        _CA_BUNDLE_PATH = path
+    except Exception:
+        try:
+            import certifi
+            _CA_BUNDLE_PATH = certifi.where()
+        except Exception:
+            _CA_BUNDLE_PATH = ""        # requests will fall back to its default trust store
+    return _CA_BUNDLE_PATH
+
+
+def _fetch_url_safe(url, session=None, timeout=25, _seen=None):
+    """Best-effort live GET, deduped per run via _seen. Returns (ok, note). NEVER raises.
+
+    Hardened for two real CT-server quirks that otherwise make every legal-source check fail:
+      * slow endpoints (eRegulations) — a generous timeout plus one retry on a transient
+        timeout / connection error; and
+      * an incomplete TLS chain (cga.ct.gov ships its leaf cert without the GoDaddy G2
+        intermediate) — we verify against certifi + that intermediate (see _ca_bundle), so the
+        chain validates WITH verification still on. These are read-only GETs of public CT
+        legal-reference pages (no credentials); the result only records that a source was
+        consulted, never an extracted/published number."""
     if _seen is not None and url in _seen:
         return _seen[url]
     try:
         import requests as _rq
-        getter = session if session is not None else _rq
-        r = getter.get(url, timeout=timeout, headers={"User-Agent": "CannaScopeCT/15 (research; verify-only)"})
-        res = (200 <= r.status_code < 300, f"HTTP {r.status_code}")
-    except Exception as e:                       # any network error -> fail safe, never propagate
-        res = (False, f"{type(e).__name__}: {str(e)[:70]}")
+    except Exception as e:
+        res = (False, f"requests unavailable: {type(e).__name__}")
+        if _seen is not None:
+            _seen[url] = res
+        return res
+    getter = session if session is not None else _rq
+    kw = {"timeout": timeout, "headers": {"User-Agent": "CannaScopeCT/15 (research; verify-only)"}}
+    bundle = _ca_bundle()
+    if bundle:
+        kw["verify"] = bundle
+    res = (False, "not attempted")
+    for _attempt in range(2):                        # one retry for slow / transient endpoints
+        try:
+            r = getter.get(url, **kw)
+            res = (200 <= r.status_code < 300, f"HTTP {r.status_code}")
+            break
+        except (_rq.exceptions.Timeout, _rq.exceptions.ConnectionError) as e:
+            res = (False, f"{type(e).__name__}: {str(e)[:70]}")
+            continue                                 # transient — try once more
+        except Exception as e:                       # any other error -> fail safe, never propagate
+            res = (False, f"{type(e).__name__}: {str(e)[:70]}")
+            break
     if _seen is not None:
         _seen[url] = res
     return res

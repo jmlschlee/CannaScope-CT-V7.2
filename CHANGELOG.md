@@ -2,7 +2,36 @@
 
 All notable changes to this project are documented here.
 
-## [15.1.0] — 2026-06-04 — CannaScope CT V15.1 — current release
+## [15.1.1] — 2026-06-04 — CannaScope CT V15.1.1 — current release
+
+Additive patch on top of V15.1.0. All prior releases remain live and unchanged; nothing was removed
+from the repository. This release restores the program's ability to reach the live Connecticut
+legal-reference sources used by the by-test-date **Legal Standard Verification** step.
+
+### Fixed
+- **Live legal-source verification reaches all three CT sources again.** The date-aware standard
+  verifier (`verify_standard`) had stopped reaching every CT source it consults:
+  - **CT DCP cannabis program** — the deep link had moved and returned HTTP 404; updated to the
+    current page (`https://portal.ct.gov/cannabis/medical-marijuana-program`).
+  - **CT eRegulations** — was timing out on a short 8-second budget; the per-source timeout is now
+    25 seconds, with one automatic retry on a transient timeout / connection error.
+  - **CT General Statutes (cga.ct.gov)** — the server presents an *incomplete* TLS certificate chain
+    (it omits the GoDaddy intermediate), so verification failed with "unable to get local issuer
+    certificate." CannaScope now supplies that well-known intermediate and verifies against it, so the
+    chain validates **with TLS certificate verification still ON** — completing the chain the server
+    should have sent, never disabling a security check.
+
+  These are read-only fetches of public CT legal-reference pages. The verifier still never fabricates a
+  dated limit, and continues to mark anything it cannot confirm as *"Historical standard not verified —
+  manual legal review needed."* The product-registry download (data.ct.gov) and offline mode were not
+  affected and are unchanged.
+
+### Unchanged / preserved
+- Every V15.1.0 feature — `audit-cache`, the `Data Exports` subfolder, the Streamlit app, short PDF
+  filenames, per-run folders, the COA triple-check, and the three-part potency review — is unchanged.
+  No files, branches, tags, or releases were deleted or renamed.
+
+## [15.1.0] — 2026-06-04 — CannaScope CT V15.1
 
 Additive maintenance + deployability release on top of V15.0.0. All prior releases (V15.0.0 and
 every beta) remain live and unchanged; nothing was removed from the repository.
