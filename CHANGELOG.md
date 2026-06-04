@@ -2,7 +2,40 @@
 
 All notable changes to this project are documented here.
 
-## [15.1.2] — 2026-06-04 — CannaScope CT V15.1.2 — current release
+## [15.1.3] — 2026-06-04 — CannaScope CT V15.1.3 — current release
+
+Additive report-quality patch on top of V15.1.2. All prior releases remain live and unchanged;
+nothing was removed from the repository. This release fixes table rendering, an accuracy
+contradiction in the legal-standard table, and documents coverage gaps more honestly.
+
+### Fixed
+- **Dates never wrap or split mid-value.** In every table, a testing/test date is now an atomic,
+  non-breaking token sized to fit a full `YYYY-MM-DD` — no more `2025-07-0` + `2` splits.
+- **Status words never break.** The Legal Standard Verification table no longer splits `UNVERIFIED`
+  into `UNVERIFIE` + `D`.
+- **Value+unit stays together.** In the Yeast & Mold review, a value and its unit no longer split
+  (e.g. `380,000 CFU/g`, `not disclosed`).
+- **Legal Standard Verification now reflects what the program actually did.** Previously the table
+  marked categories like yeast & mold "UNVERIFIED" even though the report applied a known dated CT
+  limit (e.g. 100,000 CFU/g) to judge those rows — an internal contradiction. The table now shows, per
+  category/era, the **applied dated standard** it used (from the built-in date-keyed registry) in one
+  column and a **separate, clearly-worded live-confirmation status** in another. The bare "historical
+  standard not verified — manual legal review needed" wording is now reserved only for categories/eras
+  where the program genuinely has no dated value on record.
+
+### Changed
+- **Conflicting-COA section is shorter and clearer.** The shared caveat that previously repeated on
+  every one of ~75 leads is now stated once at the section top; each case keeps only its own specifics.
+- **Higher-quality OCR for image-only COAs.** Scanned COAs whose first OCR pass returns no text are now
+  re-rendered at a higher resolution and re-OCR'd (an escalating-DPI retry). Clean COAs are unaffected.
+- **More honest coverage-gap wording.** Unreadable COAs are described as unreadable "even after an
+  escalating-DPI OCR retry," documenting what was attempted before a record is held out as a gap.
+
+### Unchanged / preserved
+- Every V15.1.2 / V15.1.1 / V15.1.0 capability is intact, including the live-source fix and legal-cache
+  versioning. No files, branches, tags, or releases were deleted or renamed.
+
+## [15.1.2] — 2026-06-04 — CannaScope CT V15.1.2
 
 Additive patch on top of V15.1.1. All prior releases remain live and unchanged; nothing was removed
 from the repository. This release makes the V15.1.1 live-source fix take effect even when an older

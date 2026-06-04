@@ -66,11 +66,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V15.1.2"
+APP_NAME = "CannaScope CT V15.1.3"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "15.1.2"
+SOFTWARE_VERSION = "15.1.3"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 
 # ============================================================================
@@ -1014,7 +1014,7 @@ def validation_summary(debug, remaining, zero_checks, src_metrics, unverified_in
         warns.append(f"{debug['broken_or_missing_coa_links']} broken / missing COA link(s) — those products "
                      "could not be reviewed.")
     if debug.get("unreadable_after_retry"):
-        warns.append(f"{debug['unreadable_after_retry']} COA(s) unreadable even after OCR retry (coverage gap).")
+        warns.append(f"{debug['unreadable_after_retry']} COA(s) unreadable even after an escalating-DPI OCR retry (coverage gap).")
     if debug.get("potency_parser_conflicts"):
         warns.append(f"{debug['potency_parser_conflicts']} potency parser conflict(s) — held OUT of findings "
                      "and routed to review, not published.")
@@ -1219,11 +1219,12 @@ def _kill_ocr_group(proc):
             pass
 
 
-def _run_ocr_worker(src, max_pages, timeout):
+def _run_ocr_worker(src, max_pages, timeout, scale=2.0):
     """Run the OCR worker in its own process group and return (returncode, stdout).
     On timeout the ENTIRE group is killed (no orphaned grandchildren), the child is
-    reaped so no zombie lingers, and TimeoutExpired is re-raised to the caller."""
-    proc = subprocess.Popen([sys.executable, _OCR_WORKER, src, str(max_pages)],
+    reaped so no zombie lingers, and TimeoutExpired is re-raised to the caller.
+    `scale` sets the render DPI (≈ scale×72) — higher rescues small-text image-only COAs."""
+    proc = subprocess.Popen([sys.executable, _OCR_WORKER, src, str(max_pages), str(scale)],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             start_new_session=True)
     try:
@@ -1302,25 +1303,36 @@ def _isolated_ocr_pdf(src, max_pages: int = 6) -> str:
     if serialize:
         with _OCR_LOCK:
             _OCR_STATS["serialized_low_memory"] += 1
-    for timeout in (120, 300):          # retry once with a longer timeout if overloaded
+
+    def _attempt(scale, timeout):
+        if serialize:
+            with _OCR_SERIALIZE, _OCR_SEM:
+                return _run_ocr_worker(src, max_pages, timeout, scale)
+        with _OCR_SEM:
+            return _run_ocr_worker(src, max_pages, timeout, scale)
+
+    # Escalating DPI: a fast first pass at the normal scale, then — only if it comes back EMPTY
+    # (an image-only COA whose small table text didn't resolve) — a higher-DPI quality retry that
+    # often rescues heavy-metal / LOD-LOQ tables. The longer-timeout retries guard against overload.
+    for scale, timeout in ((2.0, 120), (2.0, 300), (3.2, 300)):
         try:
-            if serialize:
-                with _OCR_SERIALIZE, _OCR_SEM:
-                    rc, out = _run_ocr_worker(src, max_pages, timeout)
-            else:
-                with _OCR_SEM:
-                    rc, out = _run_ocr_worker(src, max_pages, timeout)
+            rc, out = _attempt(scale, timeout)
             if rc == 0:
-                with _OCR_LOCK:
-                    _OCR_STATS["ok"] += 1
-                return (out or b"").decode("utf-8", "replace")
-            with _OCR_LOCK:             # non-zero exit = native crash; retry won't help
+                text = (out or b"").decode("utf-8", "replace")
+                if text.strip():
+                    with _OCR_LOCK:
+                        _OCR_STATS["ok"] += 1
+                        if scale > 2.0:
+                            _OCR_STATS["rescued_high_dpi"] = _OCR_STATS.get("rescued_high_dpi", 0) + 1
+                    return text
+                continue                # empty at this DPI -> escalate to a higher-DPI retry
+            with _OCR_LOCK:             # non-zero exit = native crash; a re-render won't help
                 _OCR_STATS["crashes"] += 1
             return ""
         except subprocess.TimeoutExpired:
             with _OCR_LOCK:
                 _OCR_STATS["timeouts"] += 1
-            continue                    # overloaded/hung -> retry once, longer timeout
+            continue                    # overloaded/hung -> retry (longer timeout / next scale)
         except Exception:
             return ""
     return ""
@@ -2424,9 +2436,12 @@ def generate_self_audit(fmt_year_rows, zero_checks, src_metrics, debug, format_h
             "Laboratories, and Analytics Labs templates: python3 CannaScope_CT_V15.py learn --years 2015-2024.")
     ur = (debug or {}).get("unreadable_after_retry", 0)
     if ur:
-        add("OCR / readability", f"{ur} COA(s) were unreadable even after OCR retry.",
+        add("OCR / readability",
+            f"{ur} COA(s) were unreadable even after an escalating-DPI OCR retry (each was re-rendered at a "
+            "higher resolution and re-OCR'd when the first pass returned no text).",
             "Unreadable COAs are coverage gaps — their results cannot be validated or published.",
-            "Re-run online at low load; consider higher OCR DPI or an alternate OCR backend for image-only COAs.")
+            "These are likely blank, corrupt, or low-quality image scans that no resolution recovers. Re-run "
+            "online at low load; for persistent cases try an alternate OCR backend or obtain a text-bearing COA.")
     smm = (src_metrics or {}).get("rows_excluded_for_coa_source_mismatch", 0)
     if smm:
         add("Source binding", f"{smm} flagged value(s) could not be re-verified in their own linked COA.",
@@ -2712,6 +2727,21 @@ def build_pdf(out_path, report_no, ctx):
     # glance), instead of being centered. alignment=2 == TA_RIGHT.
     cellr = ParagraphStyle("cr", parent=cell, alignment=2)
     cellrb = ParagraphStyle("crb", parent=cell, fontName=BFB, alignment=2)
+    # Atomic cells: a token that must NEVER split mid-character (a date, a status word, a value+unit).
+    # splitLongWords=0 stops reportlab's char-level wrapping of an over-wide token (it stays whole and,
+    # because the column is sized to fit it, renders on one line). Pair with nbsp() to keep a number
+    # and its unit on the same line. datecell is a touch smaller so a full YYYY-MM-DD always fits its
+    # column even on the least-stretched table.
+    cell_nb = ParagraphStyle("cnb", parent=cell, splitLongWords=0)
+    cellc_nb = ParagraphStyle("ccnb", parent=cellc, splitLongWords=0)
+    cellb_nb = ParagraphStyle("cbnb", parent=cellb, splitLongWords=0)
+    datecell = ParagraphStyle("datec", parent=cellc, fontSize=9.5, leading=12.5, splitLongWords=0)
+    NBSP = "\u00a0"
+
+    def nbsp(s):
+        # keep value+unit (and other space-joined atomic phrases) on one line
+        return s.replace(" ", NBSP)
+
     head = ParagraphStyle("h", fontName=BFB, fontSize=11, leading=14, textColor=colors.white, alignment=1)
     # centered MAJOR section header (large). NOTE: keepWithNext is intentionally OFF here.
     # reportlab's keepWithNext groups a header + intro + the ENTIRE following table into one
@@ -2750,7 +2780,9 @@ def build_pdf(out_path, report_no, ctx):
         return esc(producer_short(p, ident))
 
     def td(p):
-        return Paragraph(esc(test_date(p)) or "—", cellc)
+        # A date is an ATOMIC token: datecell (splitLongWords=0) keeps a full YYYY-MM-DD whole on one
+        # line; nbsp() guards any space so it never breaks. Date columns are sized to fit (see widths).
+        return Paragraph(nbsp(esc(test_date(p))) or "—", datecell)
 
     def coa(p):
         ref = tcase(p.registration_number or "COA")
@@ -3145,8 +3177,15 @@ def build_pdf(out_path, report_no, ctx):
             "changed over the years, so each document carries the limit that applied when it was issued) — NOT a "
             "single fixed limit and NOT any CannaScope internal threshold. Such a record is a <b>possible "
             "lab-shopping indicator</b> and a potential state-standard concern. Every item <b>requires human "
-            "review</b> and does not, by itself, establish lab-shopping, a violation, or any wrongdoing — it may "
-            "also reflect a legitimate retest, sampling differences, remediation, or clerical error.", CTX))
+            "review</b> and does not, by itself, establish lab-shopping, a violation, or any wrongdoing.", CTX))
+        # Shared caveat stated ONCE here, so it isn't repeated on every case below (each case then carries
+        # only its own specifics — identifiers, the actual values, and the ratio/difference).
+        intro_box(
+            "<b>Applies to every case below.</b> A difference between two reports for the same lot can have "
+            "innocent explanations — a legitimate retest, sampling differences, lot variability, remediation, a "
+            "clerical/transcription error, or a parsing/format artifact. Each case is listed <b>for human review "
+            "only</b> and is never, by itself, a determination of lab-shopping, a violation, or wrongdoing. The "
+            "per-case notes below give only the case-specific facts.", color="#7a5c00")
         stored = (ctx.get("src_metrics") or {}).get("conflict_fingerprints_in_store", 0)
         if not items:
             msg = ("<b>No conflicting COA result patterns detected</b> across the persistent cross-run record"
@@ -3240,13 +3279,10 @@ def build_pdf(out_path, report_no, ctx):
                 if rel == "Possible lab-shopping indicator":
                     narr = (lead + "A failed result at one lab followed by a passing result at a <b>different lab</b>, "
                             "for the same lot, is a <b>possible lab-shopping indicator</b> and a potential state-standard "
-                            "concern worth review. It may also reflect a legitimate retest, sampling differences, "
-                            "remediation, or clerical error. Flagged for human review — not a determination of any "
-                            "violation or wrongdoing.")
+                            "concern worth review.")
                 else:
                     narr = (lead + "Both results are from the <b>same laboratory</b>, so this is <b>not</b> a lab-shopping "
-                            "pattern; it more likely reflects a same-lot retest, a sampling difference, remediation, or a "
-                            "clerical/transcription error. Flagged for human review — not a determination of any wrongdoing.")
+                            "pattern; it more likely reflects a same-lot retest or a clerical/transcription difference.")
             elif a.get("value") is not None and b.get("value") is not None:
                 # Same pass/fail status with a numeric swing. c['diff']/c['timeline'] now carry the
                 # corrected, bound/unit-guarded math (and flag a likely parser/format artifact when
@@ -3256,13 +3292,11 @@ def build_pdf(out_path, report_no, ctx):
                             "Cross-lab numeric swing": "a cross-lab numeric difference"}.get(rel, "a numeric difference")
                 narr = ("For the same product identifier on the same regulated test, two reports show "
                         f'different values ({esc(av)} vs {esc(bv)}) — both reported {esc(a.get("status") or "—")}. '
-                        f"This is best read as {kindword}. The size and nature of the difference are summarized above; "
-                        "it may reflect retesting, sampling differences, lot variability, remediation, a clerical error, "
-                        "or a parsing/format artifact. Flagged for human review, not as a finding of any wrongdoing.")
+                        f"This is best read as {kindword}; the size and nature of the difference are summarized above.")
             else:
                 # No safety conflict (e.g. multiple lab reports on one lot with no pass/fail clash).
                 narr = ("The same lot identifier appears on more than one report with no pass/fail safety conflict "
-                        "detected. Listed for completeness and human review only — not an indicator of wrongdoing.")
+                        "detected. Listed for completeness and human review only.")
             block = [Spacer(1, 4), head, ident_line, Spacer(1, 2), comp]
             if extra:
                 block.append(Paragraph("&nbsp;&nbsp;".join(extra), TREND))
@@ -3330,7 +3364,7 @@ def build_pdf(out_path, report_no, ctx):
                            "Connecticut legal limit. Severity colors the rank, CT %, and difference.", CTX))
     tf_cols = ["#", "Product", "Testing Date", "Producer", "Contaminant", "Measured", "CT Limit", "CT %",
                "CannaScope", "Diff. From CannaScope", "COA"]
-    tf_w = [0.35*inch, 1.85*inch, 0.9*inch, 1.55*inch, 1.25*inch, 1.2*inch, 1.15*inch, 0.85*inch, 1.15*inch, 1.4*inch, 1.0*inch]
+    tf_w = [0.35*inch, 1.77*inch, 0.98*inch, 1.55*inch, 1.25*inch, 1.2*inch, 1.15*inch, 0.85*inch, 1.15*inch, 1.4*inch, 1.0*inch]
     rows, sevs = [], []
     for i, (p, d) in enumerate(ctx["exec_rows"][:15], 1):
         sev = sev_of(d); bar = SEVC[sev][0]; sevs.append(sev); unit = d.get("unit", "")
@@ -3599,7 +3633,7 @@ def build_pdf(out_path, report_no, ctx):
                 for i, r in enumerate(gA[:MAX_TABLE_ROWS], 1)]
         story.append(tbl(["#", "Product", "Producer", "Tested", "Lab", "Potential issue (verify on COA)",
                           "Authority area to verify", "COA"], rows,
-                         [0.32*inch, 1.85*inch, 1.5*inch, 0.8*inch, 1.25*inch, 2.5*inch, 1.9*inch, 0.95*inch],
+                         [0.32*inch, 1.85*inch, 1.5*inch, 0.98*inch, 1.25*inch, 2.32*inch, 1.9*inch, 0.95*inch],
                          hc=RED, band="#f8d2d0"))
         overflow_note(len(gA), "compliance_flags.csv")
     else:
@@ -3627,8 +3661,8 @@ def build_pdf(out_path, report_no, ctx):
                 for i, r in enumerate(gB[:MAX_TABLE_ROWS], 1)]
         story.append(tbl(["#", "Product", "Producer", "Tested", "Type", "THCA", "&#916;9-THC", "CBD", "Total THC",
                           "Total Cann.", "Reason for review", "COA"], rows,
-                         [0.3*inch, 1.7*inch, 1.35*inch, 0.85*inch, 0.95*inch, 0.72*inch, 0.78*inch, 0.62*inch,
-                          0.78*inch, 0.82*inch, 2.05*inch, 0.92*inch], hc=RED, band="#f8d2d0"))
+                         [0.3*inch, 1.7*inch, 1.35*inch, 0.98*inch, 0.95*inch, 0.72*inch, 0.78*inch, 0.62*inch,
+                          0.78*inch, 0.82*inch, 1.92*inch, 0.92*inch], hc=RED, band="#f8d2d0"))
         overflow_note(len(gB), "compliance_flags.csv")
         story.append(Paragraph("Cannabinoid columns are the COA's own values, shown so the concern is clear "
                                "without opening the COA. Total THC &#8776; 0.877 &#215; THCA + &#916;9-THC.", note_st))
@@ -3645,7 +3679,7 @@ def build_pdf(out_path, report_no, ctx):
                  Paragraph(esc(r["finding"]), cell), coa_cell(r["p"])]
                 for i, r in enumerate(gC[:MAX_TABLE_ROWS], 1)]
         story.append(tbl(["#", "Product", "Producer", "Tested", "Lab", "Potential issue (verify on COA)", "COA"],
-                         rows, [0.32*inch, 1.95*inch, 1.55*inch, 0.8*inch, 1.3*inch, 4.0*inch, 0.95*inch],
+                         rows, [0.32*inch, 1.95*inch, 1.55*inch, 0.98*inch, 1.3*inch, 3.82*inch, 0.95*inch],
                          hc=RED, band="#f8d2d0"))
         overflow_note(len(gC), "compliance_flags.csv")
         story.append(Paragraph("See also the Yeast & Mold Standard Review — these relate to CT's "
@@ -3715,29 +3749,69 @@ def build_pdf(out_path, report_no, ctx):
     if lrecs:
         subhead("Legal Standard Verification (by test date)", color=NAVY)
         story.append(Paragraph(
-            "For each date-sensitive category/era used above, the program verifies the applicable standard "
-            "<b>local-first</b> (its built-in dated registry, then a cached prior lookup) and only consults the "
-            "<b>live</b> CT sources (eRegulations, the CGS, DCP guidance) as a <b>fallback</b> when local data "
-            "can't confirm it. Network is optional and fail-safe — it never blocks this report. Exact historical "
-            "numeric limits are <b>not auto-extracted from legal prose</b>; an unconfirmed standard reads "
-            f"&quot;{esc(LEGAL_UNVERIFIED)}&quot; with the sources that were consulted, for manual review.", CTX))
+            "This table separates <b>two different things</b> so they are not confused: (1) the <b>dated standard "
+            "this report actually applied</b> to judge each category — taken from CannaScope's built-in, date-keyed "
+            "registry of Connecticut limits — and (2) whether that exact figure was <b>independently confirmed against "
+            "a live CT legal source</b> this run. The program is <b>local-first</b>: it judges every row against the "
+            "applied dated limit shown below. Live sources (eRegulations, the CGS, DCP guidance) are consulted only as "
+            "a <b>fallback</b> and are optional and fail-safe (they never block this report). CannaScope <b>does not "
+            "auto-extract</b> an exact numeric limit from legal prose, so a reached live source means &quot;available "
+            "for manual confirmation,&quot; not &quot;auto-verified.&quot; Only a category/era for which the program "
+            "has <b>no dated value at all</b> is marked "
+            f"&quot;{esc(LEGAL_UNVERIFIED)}.&quot;", CTX))
         _STD_LBL = {"yeast_mold": "Yeast & mold", "aerobic": "Aerobic count",
                     "pathogens": "Pathogens", "heavy_metals": "Heavy metals", "thc_potency": "THC potency"}
+        # For categories whose standard isn't a single number, name the real basis the report used —
+        # NOT a blank "unverified" (that wording is reserved for eras with genuinely no dated value).
+        _NOLIMIT_BASIS = {
+            "heavy_metals": "Per-analyte action limits (As / Cd / Pb / Hg) — see the Applicable CT Standards table above",
+            "thc_potency": "No numeric cap — plausibility check only (Total THC ≈ 0.877 × THCA + Δ9)"}
+
+        def _applied_std(r):
+            """The dated standard the report ACTUALLY applied for this category/era (string), or None
+            only when the program genuinely has no dated value on record."""
+            lim, unit = r.get("limit"), (r.get("unit") or "")
+            if isinstance(lim, (int, float)):
+                if lim == 0:
+                    return nbsp(esc((f"0 {unit}").strip())) + " (zero&nbsp;tolerance)"
+                return nbsp(esc((f"{lim:,} {unit}").strip()))
+            basis = _NOLIMIT_BASIS.get(r.get("category"))
+            if basis:
+                return esc(basis)
+            if (r.get("source") or "").strip():
+                return esc(r["source"])
+            return None
+
+        def _live_conf(r):
+            """Clear, non-alarming live-confirmation status — kept SEPARATE from the applied value."""
+            reached = any(a.get("ok") for a in (r.get("sources_attempted") or []))
+            if r.get("verified"):
+                return '<font color="#1E7E34"><b>Confirmed</b></font> — dated registry entry marked verified.'
+            if _applied_std(r) is not None:
+                base = ('<font color="#1E7E34"><b>Applied from dated registry.</b></font> Exact live numeric not '
+                        'auto-extracted from legal prose')
+                return base + ('; live CT sources <b>reached</b> — confirm the exact figure at eRegulations / DCP.'
+                               if reached else '; live CT sources <b>unreachable</b> this run — queued for retry.')
+            return f'<font color="#9A7B0A"><b>{esc(LEGAL_UNVERIFIED)}</b></font>'
+
         lrows = []
         for r in lrecs[:MAX_TABLE_ROWS]:
             srcs = r.get("sources_attempted") or []
             srctxt = ("; ".join(f'{esc(a["label"])} [{("reached" if a["ok"] else esc(a["result"]))}]' for a in srcs)
                       if srcs else "—")
-            vcol = "#1E7E34" if r.get("verified") else "#9A7B0A"
+            applied = _applied_std(r)
+            applied_cell = (Paragraph(applied, cellc_nb) if applied is not None
+                            else Paragraph('<font color="#9A7B0A">No dated value on record</font>', cellc_nb))
             lrows.append([Paragraph(esc(_STD_LBL.get(r.get("category"), r.get("category", ""))), cell),
                           Paragraph(esc(str(r.get("era", ""))), cellc),
-                          Paragraph(f'<font color="{vcol}"><b>{"verified" if r.get("verified") else "UNVERIFIED"}</b></font>', cellc),
-                          Paragraph(esc(r.get("status", "")), cell),
-                          Paragraph(esc(r.get("fetched_at", "") or "—"), cellc),
-                          Paragraph(srctxt, cell)])
-        story.append(tbl(["Category", "Era", "Status", "How resolved", "Live-checked at", "Sources consulted"],
-                         lrows, [1.4*inch, 0.7*inch, 1.1*inch, 2.4*inch, 1.4*inch, 3.0*inch],
-                         hc=NAVY, band="#eef2f5", big=False, aligns=["L", "C", "C", "L", "C", "L"]))
+                          applied_cell,
+                          Paragraph(_live_conf(r), cell_nb),
+                          Paragraph(srctxt, cell),
+                          Paragraph(esc(r.get("fetched_at", "") or "—"), cellc_nb)])
+        story.append(tbl(["Category", "Era", "Applied standard (by test date)", "Live-source confirmation",
+                          "Sources consulted", "Live-checked"],
+                         lrows, [1.2*inch, 0.55*inch, 1.7*inch, 2.7*inch, 2.6*inch, 1.1*inch],
+                         hc=NAVY, band="#eef2f5", aligns=["L", "C", "L", "L", "L", "C"]))
         if ctx.get("legal_unreachable"):
             story.append(Paragraph(f"<b>{len(ctx['legal_unreachable'])}</b> live source URL(s) were unreachable "
                                    "this run and are queued for re-attempt next run (logged in the Self-Audit).", note_st))
@@ -3828,27 +3902,30 @@ def build_pdf(out_path, report_no, ctx):
             sev = "RED" if (a["aspergillus_detected"] or a["high_risk"] or a["over_current"]
                             or a.get("over_lab_limit")) else "YELLOW"
             sevs.append(sev)
+            # The unit (CFU/g) is in the column header, so the value cell shows the NUMBER only,
+            # kept whole (cellb_nb) — no more "380,000 CFU/g" splitting a number from its unit.
             if a["mval"] is not None:
-                tymtxt = esc(clean_value(a["mval"], "CFU/g"))
+                tymtxt = nbsp(esc(clean_value(a["mval"], "")))
             elif a["bbound"] is not None:
-                tymtxt = "&lt; " + esc(clean_value(a["bbound"], "CFU/g"))   # below-detection bound
+                tymtxt = nbsp("&lt; " + esc(clean_value(a["bbound"], "")))   # below-detection bound
             elif a["passed_no_value"]:
-                tymtxt = '<font color="#9A7B0A">not disclosed</font>'
+                tymtxt = '<font color="#9A7B0A">' + nbsp("not disclosed") + '</font>'
             else:
                 tymtxt = "—"
-            labtxt = (esc(clean_value(a["lab_limit"], "CFU/g")) if a["lab_limit"] is not None
-                      else '<font color="#777">unknown (no dated standard)</font>')
+            # Lab-limit column header has no unit, so keep value+unit here but glue them with NBSP.
+            labtxt = (nbsp(esc(clean_value(a["lab_limit"], "CFU/g"))) if a["lab_limit"] is not None
+                      else '<font color="#777">' + nbsp("unknown (no dated standard)") + '</font>')
             flagtxt = "<br/>".join(_FLAGLBL.get(f, esc(f)) for f in a["flags"])
             rows.append([Paragraph(f'<b>{i}</b>', cellc),
                          Paragraph(esc(tcase(p.product_name)), cell), Paragraph(pr(p), cell),
                          Paragraph(esc(a["lab"] or "Unknown lab"), cell),
-                         Paragraph(esc(fmt_date(getattr(p, "testing_date", "") or p.approval_date) or "Unknown"), cellc),
-                         Paragraph(tymtxt, cellb), Paragraph(labtxt, cellc), _vcell(a),
+                         td(p),
+                         Paragraph(tymtxt, cellb_nb), Paragraph(labtxt, cellc_nb), _vcell(a),
                          Paragraph(flagtxt, cell), coa_cell(p)])
         story.append(tbl(["#", "Product", "Producer", "Lab", "Test Date", "TYM (CFU/g)",
                           "Lab limit on that date", "Lab / Now / Strict (10k)", "Concern", "COA"], rows,
-                         [0.3*inch, 1.85*inch, 1.45*inch, 1.35*inch, 0.85*inch, 1.0*inch, 1.25*inch,
-                          1.95*inch, 1.6*inch, 0.95*inch], hc=PURPLE, band="#ead9f2", rank_sevs=sevs))
+                         [0.3*inch, 1.85*inch, 1.45*inch, 1.35*inch, 0.98*inch, 1.0*inch, 1.3*inch,
+                          1.95*inch, 1.47*inch, 0.95*inch], hc=PURPLE, band="#ead9f2", rank_sevs=sevs))
         overflow_note(len(tymf), "tym_standard_review.csv")
     else:
         story.append(Paragraph("No products in this run raised a lab/date-aware yeast &amp; mold standard or "

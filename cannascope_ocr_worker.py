@@ -35,6 +35,14 @@ def main():
         return
     path = sys.argv[1]
     max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+    # Optional 3rd arg: render scale (≈ scale×72 DPI). Higher DPI markedly improves OCR of small
+    # table text in image-only COAs (e.g. heavy-metal LOD/LOQ/Result columns). Default stays 2.0
+    # for back-compat; the main program routes the quality retry through a higher scale.
+    try:
+        scale = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
+    except (TypeError, ValueError):
+        scale = 2.0
+    scale = max(1.0, min(scale, 4.0))     # clamp: below 1 is useless, above 4 risks OOM for no gain
     backend = _backend()
     if not backend:
         return
@@ -42,7 +50,9 @@ def main():
     doc = pdfium.PdfDocument(path)
     out = []
     for i in range(min(len(doc), max_pages)):
-        img = doc[i].render(scale=2.0).to_pil()
+        page = doc[i]
+        bitmap = page.render(scale=scale)
+        img = bitmap.to_pil()
         if backend == "ocrmac":
             from ocrmac import ocrmac
             res = ocrmac.OCR(img).recognize()
@@ -50,6 +60,8 @@ def main():
         else:
             import pytesseract
             out.append(pytesseract.image_to_string(img.convert("L")))
+        bitmap.close()
+        page.close()
     doc.close()
     sys.stdout.write("\n".join(out))
 
