@@ -1,11 +1,37 @@
 # Python
 venv/
 coa-env/
+.venv/
 __pycache__/
 *.pyc
 
-# Program output (regenerated on every run; can be large)
+# Program output (regenerated on every run; can be large) — never committed
 ct_audit_output/
+CannaScope CT V15 - Statewide Transparency Reports/
+CannaScope CT V1*/
+CannaScope CT Beta*/
+output/
+
+# Secrets / credentials — NEVER commit
+cannascope_ct.env
+.env
+secrets.toml
+.streamlit/secrets.toml
+
+# Logs and resumable working / handoff state
+*.log
+v16_cache_audit_progress.json
+V16_CACHE_AUDIT_HANDOFF.md
+v15_1_release_progress.json
+V15_1_RELEASE_HANDOFF.md
+
+# Local release-build working files + packaged zips (the program file ships in the GitHub release)
+_rel_*
+_gh_publish.py
+_build_release_zips.py
+CannaScopeCT-V15*.zip
+CannaScope CT V1*.zip
+CannaScope_CT_V15.py
 
 # OS
 .DS_Store

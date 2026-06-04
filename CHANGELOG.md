@@ -2,7 +2,35 @@
 
 All notable changes to this project are documented here.
 
-## [15.0.0] — 2026-06-04 — CannaScope CT V15 — current release
+## [15.1.0] — 2026-06-04 — CannaScope CT V15.1 — current release
+
+Additive maintenance + deployability release on top of V15.0.0. All prior releases (V15.0.0 and
+every beta) remain live and unchanged; nothing was removed from the repository.
+
+### Added
+- **Pre-V16 cache audit & re-evaluation** — a new `audit-cache` subcommand that re-validates the
+  scan ledger against the current analysis-logic version (`ANALYSIS_VERSION`). It re-evaluates every
+  previously clean-skipped record under current detection/validation, surfaces any that now produce
+  findings, and re-stamps the cache as current. Resumable, batched, checkpointed, and
+  non-destructive (it backs up the ledger first). A full local run re-checked all ~17k records and
+  confirmed the stale cache was not hiding findings.
+- **`--force-rescan`** (on both `audit-cache` and `statewide`) — ignore the skip-list and reprocess
+  everything from scratch, for testing / validation / major-version dev.
+- **Streamlit web app (`streamlit_app.py`)** — a friendly browser UI (Statewide sample + Consumer
+  Concern lookup) that drives the V15 program and serves the PDF via a download button. Deployable
+  on Streamlit Community Cloud from `main`. Light work per click; secrets via `st.secrets` only.
+
+### Changed
+- **Tidier output folders** — within each per-run report folder, all CSV + diagnostic exports now go
+  in a **`Data Exports`** subfolder, so the folder holds just the PDF + that one subfolder.
+- Declared version bumped to **15.1** (cover, footer, metadata).
+
+### Unchanged / preserved
+- The short PDF filenames, per-run folders, persistent numbering registry, COA triple-check, legal
+  date-aware verification, three-part potency review, and all V15.0.0 features remain as-is. No files,
+  branches, tags, or releases were deleted or renamed.
+
+## [15.0.0] — 2026-06-04 — CannaScope CT V15
 
 A truth-in-reporting release: the report says only what the COAs and the date-correct standards
 support, labels its own limits plainly, and packages cleanly. All prior releases remain live and

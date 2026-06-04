@@ -66,11 +66,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V15"
+APP_NAME = "CannaScope CT V15.1"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "15"
+SOFTWARE_VERSION = "15.1"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 
 # ============================================================================
@@ -282,7 +282,10 @@ MAX_TABLE_ROWS = 75      # per-section PDF row cap. A single-year run rarely hit
                          # uncapped data always lives in the per-section CSV exports.
 
 OUT_DIR = "CannaScope CT V15 - Statewide Transparency Reports"
-LEGACY_OUT_DIRS = ["CannaScope CT V14 - Statewide Transparency Reports", "CannaScope CT V13 - Statewide Transparency Reports", "CannaScope CT Beta V12.1 - Statewide Transparency Reports", "CannaScope CT Beta V12 - Statewide Transparency Reports", "CannaScope CT Beta V11.1 - Statewide Transparency Reports"]   # auto-migrated to OUT_DIR if present (V14 folder first -> V15 inherits its cache, reports, and global report-number sequence)
+# Inside each per-run output folder, all CSV + diagnostic exports go in this subfolder so the run
+# folder stays tidy (just the PDF + this one "Data Exports" subfolder).
+_EXPORTS_SUBDIR = "Data Exports"
+LEGACY_OUT_DIRS =["CannaScope CT V14 - Statewide Transparency Reports", "CannaScope CT V13 - Statewide Transparency Reports", "CannaScope CT Beta V12.1 - Statewide Transparency Reports", "CannaScope CT Beta V12 - Statewide Transparency Reports", "CannaScope CT Beta V11.1 - Statewide Transparency Reports"]   # auto-migrated to OUT_DIR if present (V14 folder first -> V15 inherits its cache, reports, and global report-number sequence)
 CACHE_DIR = os.path.join(OUT_DIR, "Flagged COA Source PDFs")
 REGISTRY_CACHE = os.path.join(OUT_DIR, "Registry Cache.csv")
 LEDGER = os.path.join(OUT_DIR, "Already-Scanned Skip List.txt")
@@ -297,6 +300,17 @@ CONFLICT_STORE = os.path.join(OUT_DIR, "Conflict Fingerprints.json")
 # COAs, parser gaps, source mismatches, unverified legal standards / failed live lookups). The NEXT
 # run reads this and surfaces still-open items, so the program remembers problems and improves.
 SELF_IMPROVE_LOG = os.path.join(OUT_DIR, "Self-Improvement Log.json")
+# --- Pre-V16 cache audit / re-evaluation (analysis-logic version stamping; resumable) -----------
+# Cache validity is tied to the ANALYSIS-LOGIC VERSION, not entry age. A ledger ("clean-skipped")
+# record is trusted/skippable ONLY if it was last evaluated under the CURRENT analysis version.
+# BUMP this whenever detection / validation / extraction logic changes materially — every older-
+# stamped AND every UNSTAMPED legacy-ledger record then becomes stale and is re-evaluated by the
+# `audit-cache` subcommand. (The existing legacy ledger is entirely unstamped, so all of it is a
+# re-eval candidate — which is exactly the pre-V16 concern: records skipped before newer logic.)
+ANALYSIS_VERSION = "15.1.0"
+AUDIT_STAMPS = os.path.join(OUT_DIR, "Cache Audit Stamps.json")   # {coa_key: {analysis_version, result, n_findings, stamped_at}}
+AUDIT_PROGRESS = "v16_cache_audit_progress.json"                  # repo-root resumable progress state (atomic)
+AUDIT_HANDOFF = "V16_CACHE_AUDIT_HANDOFF.md"                      # repo-root human-readable handoff
 # Report filenames now follow the PDF REPORT NAMING STANDARD (see report_filename / next_report_path):
 #   [REPORT#]-CannaScopeCT-V[VERSION]-[TYPE]-[DATE]-[TIME].pdf   (TYPE = Statewide | ConsumerConcern)
 REGISTRY_TTL = 6 * 3600
@@ -932,8 +946,10 @@ def producer_trend_context(legal, analyte_name):
     slug = re.sub(r"[^a-z0-9]+", "_", (analyte_name or "").lower()).strip("_")
     if not slug:
         return None
-    # severity CSVs now live inside each run's output folder (one level deep) — pick the most recent.
-    cands = (_glob.glob(os.path.join(OUT_DIR, "*", f"severity_{slug}.csv"))
+    # severity CSVs now live in each run folder's "Data Exports" subfolder — pick the most recent,
+    # tolerating the new nested layout plus any older flatter layouts on disk.
+    cands = (_glob.glob(os.path.join(OUT_DIR, "*", _EXPORTS_SUBDIR, f"severity_{slug}.csv"))
+             + _glob.glob(os.path.join(OUT_DIR, "*", f"severity_{slug}.csv"))
              + _glob.glob(os.path.join(OUT_DIR, f"severity_{slug}.csv")))
     if not cands:
         return None
@@ -2753,7 +2769,7 @@ def build_pdf(out_path, report_no, ctx):
         if total > shown:
             story.append(Paragraph(
                 f"Showing the top {shown:,} of {total:,} {what} (ranked by severity). "
-                f"The complete list is in <b>{esc(csv_hint)}</b>.",
+                f"The complete list is in <b>{esc(_EXPORTS_SUBDIR)}/{esc(csv_hint)}</b>.",
                 ParagraphStyle("ov", parent=CTX, textColor=colors.HexColor("#8a5a00"))))
 
     # ---- findings-first summary box + per-section trend notes (text only; tables unchanged) ----
@@ -3164,7 +3180,7 @@ def build_pdf(out_path, report_no, ctx):
         if len(items) > CASE_CAP:
             story.append(Paragraph(f"Showing the {CASE_CAP} highest-severity of {len(items)} review leads above; "
                                    "the complete list, with dates and COA links, is in "
-                                   "<b>conflicting_coa_results.csv</b>.", CTX))
+                                   "<b>Data Exports/conflicting_coa_results.csv</b>.", CTX))
         story.append(Paragraph("Validation &amp; self-audit: This section flags document-level discrepancies "
                                "only. It does not prove intent, misconduct, remediation, or unlawful conduct "
                                "without further verification.", note_st))
@@ -3822,7 +3838,7 @@ def build_pdf(out_path, report_no, ctx):
         story.append(Paragraph(
             f"<b>{n_full}</b> published row(s) fully confirmed on all six fields; <b>{n_part}</b> published with "
             "one or more context fields unconfirmed in the COA text (value always confirmed). Full per-row "
-            "stamps are in <b>COA_Provenance_Audit.csv</b>.", note_st))
+            "stamps are in <b>Data Exports/COA_Provenance_Audit.csv</b>.", note_st))
     # ---- Coverage Gaps / Unvalidated COAs (kept OUT of the validated findings sections) ----
     # Direct Paragraph (not H(), which title-cases and would mangle the "COAs" acronym).
     story.append(Paragraph("Coverage Gaps / Unvalidated COAs",
@@ -4092,7 +4108,11 @@ def _w(path, header, rows):
 
 
 def write_outputs(ctx):
-    P = lambda n: os.path.join(RUN_OUT_DIR, n)   # CSVs/diagnostics go into THIS run's folder
+    # All CSVs + diagnostics go into a tidy "Data Exports" subfolder of this run's folder, so the run
+    # folder itself holds just the PDF + that one subfolder.
+    _exports = os.path.join(RUN_OUT_DIR, _EXPORTS_SUBDIR)
+    os.makedirs(_exports, exist_ok=True)
+    P = lambda n: os.path.join(_exports, n)
     lmap, ident, watch = ctx["lmap"], ctx["ident"], ctx["watch"]
 
     def row(p, d=None):
@@ -5648,6 +5668,271 @@ def _print_selftest_report(rows):
     print("=" * 96 + "\n")
 
 
+# ============================================================================
+# PRE-V16 LOCAL CACHE AUDIT & RE-EVALUATION (resumable, batched, checkpointed)
+# ----------------------------------------------------------------------------
+# Re-evaluates every ledger ("clean-skipped") record that was NOT last evaluated under the CURRENT
+# analysis version (ANALYSIS_VERSION). The legacy ledger is entirely UNSTAMPED, so all of it is a
+# candidate — surfacing records that scanned clean before newer detection/validation existed and
+# now produce findings. Non-destructive (backs up the ledger; old result for any ledgered record is
+# "clean" by definition), idempotent (done records are stamped `current`), and fully resumable.
+# ============================================================================
+def _now_str():
+    return datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _atomic_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=1)
+    os.replace(tmp, path)
+
+
+def _load_json_or(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _audit_findings(p):
+    """Short human list of what now flags on a re-scanned record (for the Phase-8 diff)."""
+    out = []
+    for f in (getattr(p, "flags", None) or []):
+        out.append(str(f.get("name") or f.get("analyte") or f.get("category") or f)[:80]
+                   if isinstance(f, dict) else str(f)[:80])
+    for t in (getattr(p, "thc_flags", None) or []):
+        out.append("high-THC: " + str(t.get("name") if isinstance(t, dict) else t)[:60])
+    try:
+        for nm in v5.pathogen_detections(p):
+            out.append("pathogen DETECTED: " + str(nm)[:60])
+        for u in v5.unquantified_findings(p):
+            out.append("unquantified: " + str(u.get("name") if isinstance(u, dict) else u)[:60])
+    except Exception:
+        pass
+    return out[:8]
+
+
+def _audit_state_for(key, stamps):
+    s = stamps.get(key)
+    if not s:
+        return "unstamped"
+    return "current" if s.get("analysis_version") == ANALYSIS_VERSION else "stale"
+
+
+def _audit_write_handoff(prog):
+    t = prog["tally"]
+    done, rem = len(prog["done"]), len(prog["remaining"])
+    L = ["# V16 Cache Audit — Handoff", "",
+         f"_Living document — last updated {_now_str()}. Machine state: `{AUDIT_PROGRESS}`._", "",
+         "## Where we are",
+         f"- Phase: **{prog.get('phase')}** · analysis version: **{prog.get('analysis_version')}**"
+         + (" · **--force-rescan**" if prog.get("force_rescan") else ""),
+         f"- Started {prog.get('started_at')} · resumed runs: {prog.get('resumed_runs', 0)}",
+         f"- Ledger (clean-skipped) total: **{prog.get('total_ledger'):,}** · registry products: {prog.get('registry_products', 0):,}",
+         "", "## Progress",
+         f"- Re-evaluated (done): **{done:,}** · remaining: **{rem:,}**",
+         f"- still clean: {t['still_clean']:,} · **NOW FINDINGS (newly discovered): {t['now_findings']:,}**",
+         f"- not in current registry: {t['not_in_registry']:,} · unreadable/error: {t['unreadable']:,}",
+         "", "## Newly discovered findings so far"]
+    if prog["new_findings"]:
+        for nf in prog["new_findings"][:40]:
+            L.append(f"- **{nf.get('product', '')}** ({nf.get('producer', '')}) — " + ("; ".join(nf.get("findings", [])))[:160])
+        if len(prog["new_findings"]) > 40:
+            L.append(f"- … and {len(prog['new_findings']) - 40} more (full list in `{AUDIT_PROGRESS}`).")
+    else:
+        L.append("- (none yet)")
+    L += ["", "## What's next",
+          f"- Resume with `python3 CannaScope_CT_V15.py audit-cache` — continues from the {rem:,} remaining; "
+          "completed records are stamped `current` and never redone.", ""]
+    if prog.get("blockers"):
+        L += ["## Blockers", *[f"- {b}" for b in prog["blockers"][:20]], ""]
+    with open(AUDIT_HANDOFF, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
+
+
+def main_audit(argv=None):
+    """Pre-V16 local cache audit & re-evaluation — resumable, batched, checkpointed (see the
+    module banner above)."""
+    ap = argparse.ArgumentParser(description=f"{APP_NAME} — pre-V16 local cache audit & re-evaluation")
+    ap.add_argument("--force-rescan", action="store_true", help="ignore stamps; re-evaluate EVERY ledger record")
+    ap.add_argument("--batch-size", type=int, default=100, help="records per checkpoint (default 100)")
+    ap.add_argument("--limit", type=int, default=0, help="cap records THIS run (0=all remaining); rest resume next run")
+    ap.add_argument("--workers", type=int, default=v4.DEFAULT_WORKERS)
+    ap.add_argument("--offline", action="store_true", help="only re-read cached COA PDFs (no network)")
+    ap.add_argument("--restart", action="store_true", help="discard prior progress and start the audit over")
+    ap.add_argument("--no-ocr", action="store_true")
+    args = ap.parse_args(argv)
+    migrate_legacy_out_dir()
+    t0 = time.time()
+    enable_isolated_ocr(); enable_safe_pdf_text()
+    if args.no_ocr:
+        v4.ocr_pdf = lambda *a, **k: ""
+    if args.offline:
+        import requests
+        enable_offline_sources(); session = requests.Session()
+    else:
+        session = v4.make_session("", args.workers)
+    watch = v4.DEFAULT_WATCH
+
+    print("=" * 78)
+    print("  CANNASCOPE CT — PRE-V16 LOCAL CACHE AUDIT & RE-EVALUATION")
+    print("=" * 78)
+
+    # ---------- RESUME PROTOCOL (check FIRST) ----------
+    prog = None if args.restart else _load_json_or(AUDIT_PROGRESS, None)
+    stamps = _load_json_or(AUDIT_STAMPS, {})
+    ledger = _load_ledger()
+    if prog:
+        prog["resumed_runs"] = prog.get("resumed_runs", 0) + 1
+        print(f"  RESUMING a prior audit (run #{prog['resumed_runs']}): {len(prog['done']):,} done, "
+              f"{len(prog['remaining']):,} remaining. Completed records are NOT redone.")
+    else:
+        # ---------- PHASE 1 — AUDIT THE CURRENT CACHE ----------
+        print("  FRESH START.\n")
+        print("  PHASE 1 — CACHE AUDIT")
+        print(f"    Skip mechanism: the scan ledger '{os.path.basename(LEDGER)}' — a flat list of COA keys")
+        print("      (coa_key = registration number, else hash(report_url)) for records that previously")
+        print("      scanned CLEAN (no flag / high-THC / unquantified / pathogen). Those keys are SKIPPED")
+        print("      ENTIRELY on later runs (never re-downloaded or re-parsed) — the auto-skip in question.")
+        print("    Schema: one key per line; NO stored result and NO analysis-version stamp.")
+        print("    Current validity rule: mere PRESENCE in the ledger (age/feature-blind) — that's the gap.")
+        print("    Other caches (registry / conflict / format-profile / COA-PDF) are DATA caches that do NOT")
+        print("      skip records, so they cannot hide findings; this audit targets the ledger.")
+        print(f"    Ledger size: {len(ledger):,} clean-skipped records.\n")
+        # ---------- PHASE 2 — VALIDITY CLASSIFICATION ----------
+        print(f"  PHASE 2 — VALIDITY CLASSIFICATION (current analysis version = {ANALYSIS_VERSION})")
+        n_cur = sum(1 for k in ledger if _audit_state_for(k, stamps) == "current")
+        n_stale = sum(1 for k in ledger if _audit_state_for(k, stamps) == "stale")
+        n_uns = len(ledger) - n_cur - n_stale
+        print(f"    current (already re-evaluated under {ANALYSIS_VERSION}): {n_cur:,}")
+        print(f"    stale (older analysis version):                        {n_stale:,}")
+        print(f"    unstamped/unknown (legacy ledger, never re-evaluated): {n_uns:,}")
+        remaining = sorted(ledger if args.force_rescan
+                           else [k for k in ledger if _audit_state_for(k, stamps) != "current"])
+        print(f"    -> RE-EVALUATION CANDIDATES: {len(remaining):,}"
+              + ("  (--force-rescan: ALL ledger records)" if args.force_rescan else ""))
+        if os.path.exists(LEDGER) and not os.path.exists(LEDGER + ".audit-backup"):
+            import shutil
+            shutil.copyfile(LEDGER, LEDGER + ".audit-backup")
+            print(f"    NON-DESTRUCTIVE: backed up the original ledger -> {os.path.basename(LEDGER)}.audit-backup")
+        prog = dict(phase="3-4 reevaluate+rebuild", analysis_version=ANALYSIS_VERSION, started_at=_now_str(),
+                    resumed_runs=0, force_rescan=bool(args.force_rescan), total_ledger=len(ledger),
+                    registry_products=0, done=[], remaining=remaining,
+                    tally=dict(still_clean=0, now_findings=0, not_in_registry=0, unreadable=0),
+                    new_findings=[], blockers=[])
+        _atomic_json(AUDIT_PROGRESS, prog)
+    _audit_write_handoff(prog)
+
+    products = load_registry(session, offline=args.offline)
+    prog["registry_products"] = len(products)
+    key2p = {v4.coa_key(p): p for p in products}
+
+    # ---------- PHASE 3/4/6 — batched re-eval + stamp refresh + logging ----------
+    run_keys = prog["remaining"][:args.limit] if args.limit else list(prog["remaining"])
+    print(f"\n  PHASE 3/4 — RE-EVALUATING {len(run_keys):,} record(s) this run "
+          f"(batch {args.batch_size}, {args.workers} workers){' [offline]' if args.offline else ''} ...")
+    processed = 0
+    for bi in range(0, len(run_keys), args.batch_size):
+        batch = run_keys[bi:bi + args.batch_size]
+        live = [(k, key2p[k]) for k in batch if k in key2p]
+        for k in batch:
+            if k not in key2p:
+                prog["tally"]["not_in_registry"] += 1
+                stamps[k] = dict(analysis_version=ANALYSIS_VERSION, result="not_in_registry", n_findings=0, stamped_at=_now_str())
+                print(f"    [skip] {k}: not in current registry (cannot re-fetch)")
+        results = {}
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(process_product, p, session, watch): k for k, p in live}
+            for fut in as_completed(futs):
+                k = futs[fut]
+                try:
+                    results[k] = fut.result()
+                except Exception as e:
+                    results[k] = None
+                    prog["blockers"].append(f"{k}: {type(e).__name__}: {str(e)[:60]}")
+        for k, p in live:
+            rp = results.get(k)
+            if rp is None:
+                prog["tally"]["unreadable"] += 1
+                stamps[k] = dict(analysis_version=ANALYSIS_VERSION, result="error", n_findings=0, stamped_at=_now_str())
+                print(f"    [rescan] {k}: re-eval error (left for review)")
+                continue
+            interesting = (bool(rp.flags) or bool(rp.thc_flags)
+                           or bool(v5.unquantified_findings(rp)) or bool(v5.pathogen_detections(rp)))
+            if interesting:
+                finds = _audit_findings(rp)
+                prog["tally"]["now_findings"] += 1
+                prog["new_findings"].append(dict(
+                    key=k, product=tcase(getattr(rp, "product_name", "") or ""), producer=getattr(rp, "producer", "") or "",
+                    report_url=getattr(rp, "report_url", "") or "", testing_date=test_date(rp),
+                    old_result="clean (auto-skipped)", findings=finds, analysis_version=ANALYSIS_VERSION, found_at=_now_str()))
+                ledger.discard(k)   # PHASE 8 + 4: a now-findings record must no longer auto-skip
+                stamps[k] = dict(analysis_version=ANALYSIS_VERSION, result="findings", n_findings=len(finds), stamped_at=_now_str())
+                print(f"    [REFRESH->FINDINGS] {k}: NEWLY DISCOVERED — {('; '.join(finds))[:120]}")
+            elif bool(rp.analytes) or bool(rp.cannabinoids):
+                # GENUINELY re-parsed and clean -> trust it: stays skippable, STAMPED current.
+                prog["tally"]["still_clean"] += 1
+                ledger.add(k)
+                stamps[k] = dict(analysis_version=ANALYSIS_VERSION, result="clean", n_findings=0, stamped_at=_now_str())
+                try:                # drop the re-downloaded clean PDF so a 17k-record audit can't bloat disk
+                    os.remove(v4.cache_path(rp))
+                except OSError:
+                    pass
+            else:
+                # COA could NOT be re-read (download/parse failed) -> it was NOT actually re-evaluated.
+                # Do NOT trust it as clean: remove it from the skip-list so a future statewide run
+                # re-scans it, and record it as unreadable (not a clean 'current' record).
+                prog["tally"]["unreadable"] += 1
+                ledger.discard(k)
+                stamps[k] = dict(analysis_version=ANALYSIS_VERSION, result="unreadable", n_findings=0, stamped_at=_now_str())
+                prog.setdefault("unreadable_keys", []).append(k)
+                print(f"    [rescan] {k}: COA could not be re-read — removed from skip-list for re-scan")
+            processed += 1
+        for k in batch:
+            if k in prog["remaining"]:
+                prog["remaining"].remove(k)
+            prog["done"].append(k)
+        _save_ledger(ledger)                       # Phase 4 rebuild (clean stays / findings removed)
+        _atomic_json(AUDIT_STAMPS, stamps)
+        _atomic_json(AUDIT_PROGRESS, prog)
+        _audit_write_handoff(prog)                 # checkpoint flush (resume-safe)
+        print(f"    checkpoint: {len(prog['done']):,} done / {len(prog['remaining']):,} left "
+              f"· now-findings: {prog['tally']['now_findings']} · {time.time() - t0:.0f}s")
+
+    # ---------- PHASE 7 — summary ----------
+    t = prog["tally"]; partial = len(prog["remaining"]) > 0
+    print("\n" + "=" * 78)
+    print("  PHASE 7 — CACHE AUDIT SUMMARY" + ("  (PARTIAL / RESUMABLE — cumulative to date)" if partial else "  (COMPLETE)"))
+    print("=" * 78)
+    print(f"    ledger records examined (cumulative): {len(prog['done']):,} of {prog['total_ledger']:,}")
+    print(f"    re-scanned this run:                  {processed:,}")
+    print(f"    still clean (re-stamped current):     {t['still_clean']:,}")
+    print(f"    NEWLY DISCOVERED findings:            {t['now_findings']:,}")
+    print(f"    not in current registry:              {t['not_in_registry']:,}")
+    print(f"    unreadable / re-eval error:           {t['unreadable']:,}")
+    print(f"    remaining to audit:                   {len(prog['remaining']):,}")
+    # ---------- PHASE 8 — newly discovered findings ----------
+    print("\n  PHASE 8 — NEWLY DISCOVERED FINDINGS (previously clean-skipped, now flagged under " + ANALYSIS_VERSION + "):")
+    if prog["new_findings"]:
+        for nf in prog["new_findings"][-25:]:
+            print(f"    • {nf['product']} ({nf['producer']}) [{nf.get('testing_date', '')}] — " + ("; ".join(nf["findings"]))[:140])
+        if len(prog["new_findings"]) > 25:
+            print(f"    … plus {len(prog['new_findings']) - 25} earlier — full list in {AUDIT_PROGRESS} / {AUDIT_HANDOFF}.")
+        print(f"\n    TOTAL newly-discovered (cumulative across sessions): {len(prog['new_findings']):,}")
+    else:
+        print("    (none yet — no previously-clean record produced findings under current logic.)")
+    if partial:
+        print(f"\n  RESUME HERE: re-run `python3 CannaScope_CT_V15.py audit-cache` to continue the remaining "
+              f"{len(prog['remaining']):,}. Done records are stamped and won't be redone.")
+    else:
+        prog["phase"] = "complete"
+        _atomic_json(AUDIT_PROGRESS, prog); _audit_write_handoff(prog)
+        print("\n  AUDIT COMPLETE — every ledger record re-evaluated under analysis version " + ANALYSIS_VERSION + ".")
+    print("=" * 78)
+
+
 def main_learn(argv=None):
     """`learn` subcommand: practice the parser against historical COAs, year by year,
     and emit a parsing-confidence report + persist what was learned."""
@@ -5735,6 +6020,9 @@ def main():
                          "embedded snapshot of already-verified-CLEAN COAs, so those are skipped "
                          "and only flagged / new products are fetched. Findings are unchanged, but "
                          "the 'reviewed' coverage is lower. Off by default (default = full scan).")
+    ap.add_argument("--force-rescan", action="store_true",
+                    help="DEV: ignore the skip-list entirely and reprocess EVERY product in the window "
+                         "from scratch (no auto-skip). For testing/validation/major-version dev.")
     ap.add_argument("--keep-clean-pdfs", action="store_true",
                     help="keep EVERY COA PDF in the cache (not just flagged ones), building a "
                          "complete local 'sources' bundle for fast offline re-runs.")
@@ -5823,7 +6111,11 @@ def main():
                   "Findings are unchanged; 'reviewed' coverage is lower.")
         else:
             print("--fast-cached: no embedded skip-list snapshot in this build; running a full scan.")
-    todo = [p for p in products if v4.coa_key(p) not in ledger]
+    if getattr(args, "force_rescan", False):
+        todo = list(products)   # --force-rescan: ignore the skip-list, reprocess everything in window
+        print(f"--force-rescan: ignoring the skip-list — reprocessing ALL {len(todo)} products in the window.")
+    else:
+        todo = [p for p in products if v4.coa_key(p) not in ledger]
     print(f"Scanning {len(todo)} COAs with {args.workers} workers ...\n")
 
     all_results, keep, failures = [], [], []
@@ -7594,11 +7886,14 @@ if __name__ == "__main__":
     #   concern  : Personalized Product Concern Report (one product, consumer concern)
     #   learn    : COA Format Learning self-test — practice against historical COAs by year
     #   statewide: Statewide Transparency Report (whole-market scan) — also the default
+    #   audit-cache: pre-V16 local cache audit & re-evaluation (resumable, batched, checkpointed)
     _sub = sys.argv[1] if len(sys.argv) > 1 else ""
     if _sub in ("concern", "consumer-concern", "patient-concern"):
         main_patient(sys.argv[2:])
     elif _sub in ("learn", "selftest", "coa-selftest", "format-learn"):
         main_learn(sys.argv[2:])
+    elif _sub in ("audit-cache", "audit", "recache", "cache-audit"):
+        main_audit(sys.argv[2:])
     elif _sub in ("statewide", "report", "market"):
         sys.argv = [sys.argv[0]] + sys.argv[2:]   # strip the subcommand for main()'s argparse
         main()

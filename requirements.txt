@@ -22,3 +22,6 @@ psutil>=5.9
 # V7.2 is a SINGLE self-contained file (CannaScope_CT_V7_2.py) — the V4 engine,
 # V5 cannabinoid/identity layer, name resolver, and OCR worker are all embedded.
 # No companion .py files are required. Older versions remain as tagged releases.
+
+# Web UI (Streamlit Community Cloud deploy of streamlit_app.py)
+streamlit>=1.40

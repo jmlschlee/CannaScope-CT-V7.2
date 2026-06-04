@@ -1,4 +1,4 @@
-# 🌿 CannaScope CT V15 — Source-Verified Cannabis Transparency Reports
+# 🌿 CannaScope CT V15.1 — Source-Verified Cannabis Transparency Reports
 
 **CannaScope CT** is a consumer-awareness research tool for Connecticut's legal cannabis market.
 It reads the state's public product registry and the Certificates of Analysis (COAs) those products
@@ -46,6 +46,16 @@ Or just **double-click a run script** in your OS package:
 
 **Requires** Python 3.9+ and the libraries in `requirements.txt`. OCR (for scanned/image COAs) is
 optional: `ocrmac` on macOS, `pytesseract` + Tesseract on Windows/Linux.
+
+## 🌐 Use it in your browser (Streamlit)
+
+No download needed — deploy the app on **Streamlit Community Cloud**:
+
+- **Repository:** `jmlschlee/CannaScope-CT`  ·  **Branch:** `main`  ·  **Main file:** `streamlit_app.py`
+
+The web app offers a **Consumer Concern Lookup** (one product by batch / NDC / COA number / BioTrack
+UID / COA link) and a small **Statewide sample** report, each delivered as a downloadable PDF. Work
+per click is kept light, and any secrets are read from `st.secrets` (never hard-coded).
 
 ## 🔎 What "source-verified" means
 
