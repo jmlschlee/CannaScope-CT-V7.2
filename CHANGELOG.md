@@ -2,7 +2,49 @@
 
 All notable changes to this project are documented here.
 
-## [13.0.0] — 2026-06-03 — CannaScope CT V13 — current release
+## [14.0.0] — 2026-06-04 — CannaScope CT V14 — current release
+
+Carries everything in V13 and adds historical COA-format awareness, a clean permanent report-naming
+standard, and layout polish. All prior releases remain live and unchanged; nothing removed.
+
+### Added
+- **COA Format Learning Layer** — historical, year-by-year (2015–2026) awareness of changing COA
+  layouts/labs/templates without assuming one fixed format and without touching the v4/v5 engine.
+  `profile_coa()` fingerprints each COA's lab, year/era, sections present + their order, pass/fail/ND
+  vocabulary, identity fields, and scanned-image flag. `assess_extraction()` cross-checks FIVE signals
+  (top-level pass/fail summary · detailed breakdown tables · numeric values · batch/product/licensee
+  identity · whether the COA matches the product record) → HIGH/MEDIUM/LOW/UNCERTAIN. A top-PASS /
+  detail-FAIL conflict, impossible numbers, or a true product mismatch marks the extraction UNCERTAIN
+  and **holds it out of the report** (a COA Extraction Review queue) instead of publishing bad data.
+  A persisted per-year readiness map (`COAFormatLearner`) accumulates across runs.
+- **`learn` self-test subcommand** — samples COAs from every available year, profiles + cross-checks
+  them, and prints/writes a year-by-year parsing-confidence report (year · sampled · labs/producers ·
+  fields read · uncertain · known layout patterns · ready-for-reports). New appendix subsection +
+  `coa_format_confidence_by_year.csv` / `coa_extraction_held.csv` + debug metrics.
+- **PDF report naming standard** — `[REPORT#]-CannaScopeCT-V[VERSION]-[TYPE]-[DATE]-[TIME].pdf`
+  (TYPE = `Statewide` | `ConsumerConcern`; DATE = `YYYY-M-D`; TIME = 12-hour `H:MMAM/PM`). The report
+  number is **global and continuous across both report types**, never resets, never reused; reports are
+  never overwritten/renamed/deleted. Cover page reformatted to match (name / `Report #N` / type /
+  `Created Month D, YYYY` / `H:MM AM/PM TZ`).
+
+### Changed / fixed
+- **Adaptive white-space reflow** — root cause was reportlab `keepWithNext` bundling a header + intro +
+  the entire following table into one block (a too-tall table jumped to the next page, leaving big
+  gaps). Headers no longer carry `keepWithNext`; a `CondPageBreak` guard prevents orphaned headers, so
+  tables split and fill pages. The ~8 large interior gaps are gone; adapts to large and small reports.
+- **Right-aligned numeric columns** (with matching right-aligned headers) across the findings tables,
+  Top Findings, High-Cannabinoid, and producer/lab trend counts for easier scanning.
+- **Conflicting-COA / lab-shopping persistence** — detection now runs over a persistent cross-run store
+  of per-COA "conflict fingerprints," so a conflict whose two COAs were scanned in different runs is
+  still found and earlier findings aren't lost on a ledger-warm re-run.
+- Rebranded from **CannaScope CT V13** to **CannaScope CT V14**.
+
+### Unchanged
+- The COA source-binding integrity rule, thresholds/calculations, and the detection engine. The
+  single-file build ships in the download zips (the embedded registry snapshot is intentionally NOT
+  committed to git to avoid repo bloat).
+
+## [13.0.0] — 2026-06-03 — CannaScope CT V13
 
 Big readability + integrity + feature release. Carries all V11/V12 capabilities; all prior releases
 remain live and unchanged. Nothing removed from the repository.

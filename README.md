@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌿 CannaScope CT V13
+# 🌿 CannaScope CT V14
 
 ### Connecticut Cannabis Transparency Report
 **Source-verified consumer-awareness & testing-pattern review**
@@ -16,10 +16,10 @@
 
 ---
 
-> ### 🆕 What's new in CannaScope CT **V13**
-> V13 is a big readability + integrity + feature release. **New:** a neutral **Conflicting COA Results & Possible Lab-Shopping Indicators** section (same physical lot with conflicting pass/fail across labs — judged against each COA's own stated limit — *requires human review, never alleges misconduct*); the **High-Cannabinoid breakdown** (THCA · Δ9-THC · CBD · Total THC · Total Cannabinoids); reworked **Potential Compliance Review Leads** (buckets A–D + chemistry consistency checks). **Fixed:** honest producer percentages, a clear dataset-accounting line, hardened report numbering (one uniquely-numbered file, no overwrite), a box-overlap rendering bug. **Cleaner:** a *Most Important Findings* box, a *How To Read* legend, a publication-first section order with all technical material in an **Appendix**. **Removed:** the two potency-reference sections and five redundant *Top…* mini-tables. Advisory — not legal or medical advice.
+> ### 🆕 What's new in CannaScope CT **V14**
+> V14 keeps everything in V13 and adds three things. **🧠 COA Format Learning:** Connecticut's lab reports have changed shape every year since 2015 — different labs, layouts, section orders, and wording. V14 now figures out each COA's format, **double-checks what it read five different ways**, and **holds back anything that looks misread** (a "PASS" up top but a failing detail, impossible numbers, or a COA that doesn't match its product) instead of reporting bad data. A new **`learn`** command prints a year-by-year read-confidence report. **🗂️ New report filenames + one global number:** every report saves as `#-CannaScopeCT-V14-Statewide-DATE-TIME.pdf` (or `-ConsumerConcern-`), numbered continuously across **both** report types, never reset, and **never overwritten** — a clean permanent archive. **📄 Cleaner pages** (long tables now fill the page instead of leaving big gaps) with **right-aligned number columns**, and **lab-shopping checks that remember across runs**. Advisory — not legal or medical advice.
 >
-> **V13 downloads:** [Windows](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.Windows.zip) · [macOS](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.macOS.zip) · [Linux](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.Linux.zip) · [release notes »](https://github.com/jmlschlee/CannaScope-CT/releases/tag/v13.0.0)
+> **V14 downloads:** [Windows](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.Windows.zip) · [macOS](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.macOS.zip) · [Linux](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.Linux.zip) · [release notes »](https://github.com/jmlschlee/CannaScope-CT/releases/tag/v14.0.0)
 
 ---
 
@@ -30,12 +30,12 @@
 
 | Operating System | Download | How to launch |
 |---|---|---|
-| 🪟 **Windows** | **[CannaScope CT V13 - Windows.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.Windows.zip)** | unzip → `run.bat statewide --days 90` |
-| 🍎 **macOS** | **[CannaScope CT V13 - macOS.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.macOS.zip)** | unzip → `chmod +x run.sh && ./run.sh statewide --days 90` |
-| 🐧 **Linux** | **[CannaScope CT V13 - Linux.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v13.0.0/CannaScope.CT.V13.-.Linux.zip)** | unzip → `chmod +x run.sh && ./run.sh statewide --days 90` |
+| 🪟 **Windows** | **[CannaScope CT V14 - Windows.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.Windows.zip)** | unzip → `run.bat statewide --days 90` |
+| 🍎 **macOS** | **[CannaScope CT V14 - macOS.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.macOS.zip)** | unzip → `chmod +x run.sh && ./run.sh statewide --days 90` |
+| 🐧 **Linux** | **[CannaScope CT V14 - Linux.zip](https://github.com/jmlschlee/CannaScope-CT/releases/download/v14.0.0/CannaScope.CT.V14.-.Linux.zip)** | unzip → `chmod +x run.sh && ./run.sh statewide --days 90` |
 
 ➡️ **[See all downloads & release notes on the Releases page »](https://github.com/jmlschlee/CannaScope-CT/releases/latest)**
-&nbsp;•&nbsp; The self-contained `CannaScope_CT_V13.py` (everything baked in) is inside each download zip above.
+&nbsp;•&nbsp; The self-contained `CannaScope_CT_V14.py` (everything baked in) is inside each download zip above.
 
 ---
 
@@ -52,6 +52,8 @@ CannaScope CT runs as **two reports in one program:**
 ## Highlights
 
 - 🆕 **Conflicting COA Results & Possible Lab-Shopping Indicators** *(new in V13, statewide report)* — neutrally surfaces, **for human review**, when the same physical lot shows conflicting pass/fail results across lab reports (especially an earlier fail then a later pass), or when one COA carries more than one lab identity. Side-by-side comparisons, source/page references, severity tiers, and explicit innocent-explanation language. **No claims of wrongdoing.**
+- 🧠 **COA Format Learning Layer** *(new in V14)* — figures out each COA's lab/year/format, cross-checks every extraction five ways (top summary · detail tables · numbers · identity · does-the-COA-match-the-product), and **holds uncertain reads out of the report** instead of publishing bad data. A `learn` self-test prints a year-by-year (2015–2026) parsing-confidence report so you know which years are safe to use.
+- 🗂️ **Permanent, uniquely-named archive** *(new in V14)* — reports save as `#-CannaScopeCT-V14-Statewide-DATE-TIME.pdf` / `-ConsumerConcern-`, with ONE global report number shared across both report types that never resets and never overwrites.
 - 🛡️ **Per-line-item COA verification (anti-hallucination)** — every flagged value must be found, as a distinct number, in the COA's own text or it is excluded from all findings and routed to manual review. Enforced in both reports, with a COA Source-Binding Audit and provenance CSVs.
 - 🧪 **Full contaminant engine** — yeast & mold, total aerobic bacteria, heavy metals (arsenic, cadmium, chromium, lead, mercury), mycotoxins, residual solvents, and zero-tolerance pathogens, each ranked by proximity to the Connecticut legal limit.
 - 🧫 **Lab- & date-aware Yeast/Mold (TYM) Standard Review** — Connecticut's passing limit for total yeast & mold varied by **lab** and **date** (up to 100×); each result is shown against three benchmarks (the lab's limit on its test date / the current limit / a strict patient-protective benchmark).
@@ -70,9 +72,11 @@ CannaScope CT runs as **two reports in one program:**
 ```bash
 # any OS, with Python 3.9+
 python3 -m pip install -r requirements.txt
-python3 CannaScope_CT_V13.py statewide --since 2024-01-01 --until 2024-12-31
+python3 CannaScope_CT_V14.py statewide --since 2024-01-01 --until 2024-12-31
 # one product a consumer is worried about:
-python3 CannaScope_CT_V13.py concern --example
+python3 CannaScope_CT_V14.py concern --example
+# how confidently can it read each year's COAs?
+python3 CannaScope_CT_V14.py learn --years 2015-2026
 ```
 
 Or use the bundled launcher for your OS (see the download table above).
@@ -91,7 +95,7 @@ Or use the bundled launcher for your OS (see the download table above).
 
 ## Output
 
-A folder **`CannaScope CT V13 - Statewide Transparency Reports/`** is created beside the program containing:
+A folder **`CannaScope CT V14 - Statewide Transparency Reports/`** is created beside the program containing:
 - the **PDF report** (cover dashboard, Findings at a Glance, the new Conflicting COA Results section, top findings, per-contaminant tables, high-cannabinoid review, TYM standard review, Ombudsman & regulatory-flag leads, producer/lab trends, validation & diagnostics),
 - **CSV exports** for every section (including `conflicting_coa_results.csv`),
 - the **registry cache** and the **source COA PDFs** for flagged products,
@@ -110,7 +114,7 @@ Spotted a mis-parse, a COA that didn't read, or have an idea?
 
 ## Version history
 
-Every prior version remains available — **nothing is removed.** See the **[Releases page](https://github.com/jmlschlee/CannaScope-CT/releases)** for V11.1, V11, V10, V9.1, and earlier and their assets, and [`CHANGELOG.md`](CHANGELOG.md) for details.
+Every prior version remains available — **nothing is removed.** See the **[Releases page](https://github.com/jmlschlee/CannaScope-CT/releases)** for V13, V12.1, V11.1, V11, V10, V9.1, and earlier and their assets, and [`CHANGELOG.md`](CHANGELOG.md) for details.
 
 ## ⚖️ Disclaimer
 
