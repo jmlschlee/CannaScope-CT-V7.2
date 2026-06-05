@@ -219,27 +219,41 @@ with tab_state:
         st.write("Reviews recently-registered products statewide and returns a **downloadable PDF**. "
                  "This hosted version reads each COA live, so it checks a fast, capped batch (newest first).")
 
-    days = st.slider("How many days back to review", 7, MAX_DAYS, 90,
-                     help="A product is included if it was registered within this many days of today.")
-    in_window = (sum(1 for p in products if p["date"]
-                     and p["date"] >= datetime.date.today() - datetime.timedelta(days=days))
-                 if products else None)
-
-    if in_window is not None:
-        st.metric(f"Products registered in the last {days} days", f"{in_window:,}")
-
     if CACHE_READY:
-        if in_window is not None:
-            st.success(f"This will review **all {in_window:,}** products from the last **{days}** days "
-                       "and produce one combined PDF.")
-        args_preview = ["statewide", "--days", str(int(days)), "--csv-cache"]
-        run_label = "statewide report"
-    else:
-        if in_window is not None and in_window > SAMPLE_CAP:
-            st.warning(f"Hosted version: it will review the **{SAMPLE_CAP} newest** of these "
-                       f"**{in_window:,}** products. For the complete report, use the desktop download.")
+        # The triple-verified COA dataset loads instantly, so the window is NOT limited by data speed.
+        # Offer everything up to all-time; the only real bound is how big a report the host can BUILD.
+        WINDOWS = {"Last 30 days": 30, "Last 90 days": 90, "Last 6 months": 182,
+                   "Last year": 365, "Last 2 years": 730, "All available (every year)": None}
+        choice = st.selectbox("How far back to review", list(WINDOWS), index=3,
+                              help="Data loads instantly from the embedded dataset. Larger windows just "
+                                   "take longer to compile into the PDF.")
+        days = WINDOWS[choice]
+        if days is None:
+            in_window = len(products) if products else None
+            args_preview = ["statewide", "--since", "2012-01-01", "--csv-cache"]
         else:
-            st.caption("Hosted version reviews the newest products in the window (capped for speed).")
+            in_window = (sum(1 for p in products if p["date"]
+                             and p["date"] >= datetime.date.today() - datetime.timedelta(days=days))
+                         if products else None)
+            args_preview = ["statewide", "--days", str(int(days)), "--csv-cache"]
+        run_label = "statewide report"
+        if in_window is not None:
+            st.metric("Products this report will review", f"{in_window:,}")
+            st.success(f"Reviews **all {in_window:,}** products ({choice.lower()}) from the "
+                       "triple-verified COA dataset — no per-product cap — and returns one combined PDF.")
+        st.caption("The data is instant; build time scales with the number of products. The very largest "
+                   "windows can be heavy on the free hosting tier — the desktop download handles any size.")
+    else:
+        days = st.slider("How many days back to review", 7, MAX_DAYS, 90,
+                         help="A product is included if it was registered within this many days of today.")
+        in_window = (sum(1 for p in products if p["date"]
+                         and p["date"] >= datetime.date.today() - datetime.timedelta(days=days))
+                     if products else None)
+        if in_window is not None:
+            st.metric(f"Products registered in the last {days} days", f"{in_window:,}")
+        if in_window is not None and in_window > SAMPLE_CAP:
+            st.warning(f"Hosted live mode: reviews the **{SAMPLE_CAP} newest** of these "
+                       f"**{in_window:,}** products. For the complete report, use the desktop download.")
         args_preview = ["statewide", "--days", str(int(days)), "--limit", str(SAMPLE_CAP)]
         run_label = "statewide sample report"
 
