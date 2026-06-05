@@ -548,6 +548,7 @@ def load_registry(session, refresh=False, offline=False):
     v5.REGISTRY_CACHE = REGISTRY_CACHE
     _seed_embedded_registry()   # no-op unless a snapshot is embedded and no cache exists yet
     _seed_embedded_coa_cache()  # no-op unless a COA cache is embedded and none exists locally yet
+    _seed_embedded_reg_ledger() # no-op unless a CT regulatory source ledger is embedded and none local
     if offline:
         # OFFLINE: read the bundled/embedded registry cache directly, ignoring its age,
         # and never reach the network.
@@ -2141,6 +2142,148 @@ def reg_corroboration(all_results):
             metal_detail[mk] = [(lim, n) for lim, n in c.most_common(3)]
     out["heavy_metals_detail"] = metal_detail
     return out
+
+
+# ── CT regulatory SOURCE-DOCUMENT ledger (full offline provenance) ────────────────────────────────
+# `fetch-standards` downloads each cited CT source document, extracts its readable text (PDF via the
+# same pdfium -> pdfplumber -> OCR chain used for COAs, so CT's non-extractable PDFs still yield text),
+# SHA-256-hashes the RAW bytes, and stores everything in CT Regulatory Ledger.json. That ledger is
+# embedded into the build (like the registry + COA caches) and auto-seeds on first run, so the program
+# carries the ACTUAL source text + a content hash for offline, forensic legal provenance — the dated
+# numeric limits are already baked in (CT_REG_CITATIONS); this caches the documents BEHIND them.
+REG_LEDGER = os.path.join(OUT_DIR, "CT Regulatory Ledger.json")
+REG_LEDGER_VERSION = 1
+
+
+# Direct CT source DOCUMENTS (incl. the actual regulation PDF, which CT serves as a non-extractable
+# scan — fetch-standards OCRs it via v4.read_pdf_text so its text is still cached for provenance).
+CT_REG_EXTRA_DOCS = [
+    ("RCSA §21a-408-58 — laboratory testing (regulation PDF)",
+     "https://eregulations.ct.gov/eRegsPortal/Browse/getDocument?guid=%7B62390E14-4059-4C8C-9263-F16137648B5A%7D"),
+]
+
+
+def _reg_source_urls():
+    """Deduped (label, url) list of CT source documents to cache (from LEGAL_SOURCES + CT_REG_CITATIONS
+    + the direct regulation-PDF docs that need OCR)."""
+    seen, out = set(), []
+    for label, url in LEGAL_SOURCES["_general"]:
+        if url not in seen:
+            seen.add(url); out.append((label, url))
+    for cat, (cit, url) in CT_REG_CITATIONS.items():
+        if url and url not in seen:
+            seen.add(url); out.append((f"{cat.replace('_', ' ')} — cited source", url))
+    for label, url in CT_REG_EXTRA_DOCS:
+        if url not in seen:
+            seen.add(url); out.append((label, url))
+    return out
+
+
+def _fetch_bytes(url, session=None, timeout=45):
+    """GET raw bytes + content-type for provenance. Never raises. -> (ok, status, content, ctype)."""
+    try:
+        import requests as _rq
+    except Exception as e:
+        return (False, f"requests unavailable: {type(e).__name__}", b"", "")
+    getter = session if session is not None else _rq
+    kw = {"timeout": timeout, "allow_redirects": True,
+          "headers": {"User-Agent": "CannaScopeCT/16 (research; legal-source provenance)"}}
+    bundle = _ca_bundle()
+    if bundle:
+        kw["verify"] = bundle
+    last = (False, "not attempted", b"", "")
+    for _attempt in range(2):
+        try:
+            r = getter.get(url, **kw)
+            return (200 <= r.status_code < 300, f"HTTP {r.status_code}", r.content or b"",
+                    r.headers.get("Content-Type", ""))
+        except Exception as e:
+            last = (False, f"{type(e).__name__}: {str(e)[:70]}", b"", "")
+    return last
+
+
+def _doc_text(raw, ctype, url):
+    """Readable text from fetched bytes. PDF -> v4.read_pdf_text (pdfium -> pdfplumber -> OCR, so a
+    non-extractable scanned reg PDF still yields text). HTML -> tag-stripped text. -> (text, method)."""
+    is_pdf = (raw[:1024].find(b"%PDF") >= 0) or ("pdf" in (ctype or "").lower()) or url.lower().endswith(".pdf")
+    if is_pdf:
+        try:
+            import tempfile
+            fd, pth = tempfile.mkstemp(suffix=".pdf"); os.close(fd)
+            try:
+                with open(pth, "wb") as f:
+                    f.write(raw)
+                txt = v4.read_pdf_text(pth) or ""
+                return txt, ("pdf+ocr" if len(txt.strip()) < 200 else "pdf")
+            finally:
+                try: os.remove(pth)
+                except OSError: pass
+        except Exception as e:
+            return "", f"pdf-error:{type(e).__name__}"
+    try:
+        import html as _html
+        s = raw.decode("utf-8", "replace")
+        s = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", s)
+        s = re.sub(r"(?s)<[^>]+>", " ", s)
+        s = re.sub(r"\s+", " ", _html.unescape(s)).strip()
+        return s, "html"
+    except Exception as e:
+        return "", f"text-error:{type(e).__name__}"
+
+
+def build_reg_ledger(online=True, session=None):
+    """Fetch each cited CT source DOCUMENT, store raw text + SHA-256(raw bytes) + fetch timestamp into
+    CT Regulatory Ledger.json for offline forensic provenance. Fully fail-safe (never raises)."""
+    import hashlib
+    stamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    entries = []
+    for label, url in _reg_source_urls():
+        if not online:
+            entries.append(dict(label=label, url=url, ok=False, status="offline — not fetched", fetched_at=stamp))
+            continue
+        ok, status, raw, ctype = _fetch_bytes(url, session)
+        if ok and raw:
+            text, method = _doc_text(raw, ctype, url)
+            entries.append(dict(label=label, url=url, ok=True, http_status=status, content_type=ctype,
+                                sha256=hashlib.sha256(raw).hexdigest(), byte_len=len(raw),
+                                text_len=len(text), method=method, text=text[:200000], fetched_at=stamp))
+        else:
+            entries.append(dict(label=label, url=url, ok=False, http_status=status, fetched_at=stamp))
+    led = dict(ledger_version=REG_LEDGER_VERSION, built_at=stamp, as_of=CT_REG_AS_OF, sources=entries)
+    try:
+        os.makedirs(OUT_DIR, exist_ok=True)
+        tmp = REG_LEDGER + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(led, f, indent=1)
+        os.replace(tmp, REG_LEDGER)
+    except OSError:
+        pass
+    return led
+
+
+def load_reg_ledger():
+    try:
+        with open(REG_LEDGER, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _seed_embedded_reg_ledger():
+    """Seed CT Regulatory Ledger.json from the embedded snapshot if none exists locally — so the
+    cached source documents + SHA-256 hashes ship with the program (offline provenance)."""
+    b64 = globals().get("_EMBEDDED_REG_LEDGER_B64")
+    if not b64 or os.path.exists(REG_LEDGER):
+        return
+    try:
+        import base64 as _b, zlib as _z
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(REG_LEDGER, "wb") as f:
+            f.write(_z.decompress(_b.b64decode(b64)))
+        print("Seeded the CT regulatory source-document ledger from the embedded snapshot (offline provenance).")
+    except Exception:
+        pass
 
 
 def _legal_cache_load():
@@ -4137,6 +4280,37 @@ def build_pdf(out_path, report_no, ctx):
     story.append(Paragraph(f"<b>Citations</b> (confirmed {esc(CT_REG_AS_OF)}; the program re-consults these live each run):", CTX))
     story.append(tbl(["Category", "CT statute / regulation / policy citation"], cite_rows,
                      [2.0*inch, 7.2*inch], hc=NAVY, band="#eef2f5", aligns=["L", "L"]))
+
+    # ---- Cached source-document provenance (the actual CT documents behind the limits) ----
+    _led = load_reg_ledger()
+    _lsrcs = (_led.get("sources") or []) if isinstance(_led, dict) else []
+    if _lsrcs:
+        _ok = [s for s in _lsrcs if s.get("ok")]
+        story.append(Paragraph(
+            f"<b>Cached source-document provenance.</b> The actual CT source documents behind these limits are "
+            f"cached in the program (text extracted via the same PDF + OCR pipeline used for COAs, with a "
+            f"<b>SHA-256</b> of the raw bytes) so the provenance is available <b>offline</b> and is tamper-evident. "
+            f"{len(_ok)} of {len(_lsrcs)} source(s) cached as of {esc(_led.get('built_at', CT_REG_AS_OF))}.", CTX))
+        prov_rows = []
+        for s in _lsrcs:
+            if s.get("ok"):
+                detail = (f"{s.get('byte_len', 0):,} B · {s.get('method', '?')} · {s.get('text_len', 0):,} chars text")
+                sha = "sha256:" + (s.get("sha256", "")[:24])
+            else:
+                detail = "not fetched this build (" + esc(str(s.get("http_status", s.get("status", "—")))) + ")"
+                sha = "—"
+            prov_rows.append([Paragraph(esc(s.get("label", "")), cell),
+                              Paragraph(f'<font color="#2C5AA0">{esc(s.get("url", ""))}</font>', cell),
+                              Paragraph(esc(detail), cell), Paragraph(esc(sha), cell_nb)])
+        story.append(tbl(["Source", "URL", "Cached document", "Content hash"], prov_rows,
+                         [2.1*inch, 3.5*inch, 2.2*inch, 1.6*inch], hc=NAVY, band="#eef2f5",
+                         aligns=["L", "L", "L", "L"]))
+    else:
+        story.append(Paragraph(
+            "<i>Source-document provenance ledger not yet built in this copy — run "
+            f"<b>python3 {esc(SCRIPT_FILE)} fetch-standards</b> to download and SHA-256-cache the CT source "
+            "documents for offline provenance (then re-embed with _make_v16.py). The dated limits above are "
+            "already cited and corroborated by the COAs regardless.</i>", CTX))
 
     # ---- Legal Standard Verification (by test date) — Part B item 7 ----
     lrecs = ctx.get("legal_records") or []
@@ -6712,6 +6886,41 @@ def main_build_cache(argv=None):
     return cache.path
 
 
+def main_fetch_standards(argv=None):
+    """Download each cited CT legal SOURCE DOCUMENT, extract its text (PDF via pdfium -> pdfplumber ->
+    OCR, so non-extractable PDFs still yield text), SHA-256-hash the raw bytes, and cache it all to
+    CT Regulatory Ledger.json for offline forensic provenance. Embed it with `_make_v16.py` so the
+    program ships WITH the source documents behind every dated limit."""
+    migrate_legacy_out_dir()
+    ap = argparse.ArgumentParser(prog="fetch-standards",
+                                 description=f"{APP_NAME} — cache CT regulatory source documents (provenance)")
+    ap.add_argument("--offline", action="store_true", help="don't fetch; just report what's cached")
+    args = ap.parse_args(argv)
+    enable_safe_pdf_text()
+    print(f"{APP_NAME} — caching CT regulatory source documents for offline provenance ...")
+    if args.offline:
+        led = load_reg_ledger()
+        if not led:
+            sys.exit("No CT Regulatory Ledger.json yet — run `fetch-standards` online once to build it.")
+    else:
+        led = build_reg_ledger(online=True)
+    srcs = led.get("sources", [])
+    ok = [s for s in srcs if s.get("ok")]
+    print("=========================================================")
+    print(f"  CT REGULATORY LEDGER  ({led.get('built_at', '?')})")
+    print(f"  sources cached : {len(ok)}/{len(srcs)} fetched OK")
+    for s in srcs:
+        if s.get("ok"):
+            print(f"   [OK ] {s['label'][:48]:48}  {s.get('byte_len',0):>9,}B  {s.get('method','?'):8}  "
+                  f"sha256 {s.get('sha256','')[:16]}  text {s.get('text_len',0):,}c")
+        else:
+            print(f"   [-- ] {s['label'][:48]:48}  {s.get('http_status', s.get('status',''))}")
+    print(f"  ledger written : {REG_LEDGER}")
+    print("  embed it into the single-file build with:  python3 _make_v16.py")
+    print("=========================================================")
+    return REG_LEDGER
+
+
 def main():
     migrate_legacy_out_dir()   # carry a pre-rename output folder over to OUT_DIR (cache + numbering)
     ap = argparse.ArgumentParser(description=f"{APP_NAME} — {REPORT_TITLE}")
@@ -8827,6 +9036,8 @@ if __name__ == "__main__":
         main_audit(sys.argv[2:])
     elif _sub in ("build-cache", "build-coa-cache", "cache-build"):
         main_build_cache(sys.argv[2:])
+    elif _sub in ("fetch-standards", "fetch-regs", "cache-standards"):
+        main_fetch_standards(sys.argv[2:])
     elif _sub in ("statewide", "report", "market"):
         sys.argv = [sys.argv[0]] + sys.argv[2:]   # strip the subcommand for main()'s argparse
         main()

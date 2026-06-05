@@ -30,7 +30,17 @@ integers split across lines (`10` → `1`/`0`) and headers garbled (`Confidence`
 Disabled character-level splitting on the base cell and header styles, so numbers and header words
 stay whole across every table.
 
-## 3. Version single-source (P4)
+## 3. Cached source-document provenance (`fetch-standards`)
+A new **`fetch-standards`** subcommand downloads each cited CT source document (RCSA §21a-408-58,
+CGS Chapter 420h, DCP Policies & Procedures — including the **regulation PDF**), extracts its text via
+the same pdfium → pdfplumber → **OCR** pipeline used for COAs (so CT's non-extractable PDFs still
+yield text), **SHA-256-hashes the raw bytes**, and stores everything in `CT Regulatory Ledger.json`.
+That ledger is **embedded into the build and auto-seeds on first run**, so the program ships with the
+actual source documents behind every limit — offline, forensic, tamper-evident provenance. A new
+"Cached source-document provenance" table in the report shows each source's URL, size, extraction
+method, text length, and content hash.
+
+## 4. Version single-source (P4)
 The header said V16 while disclaimers and the recommended `learn` command still named the old V15
 script. Every rendered/printed mention now derives from one version constant, so the report always
 names the actual current file. Version → **16.1.0**.
@@ -45,7 +55,7 @@ Detection thresholds, the triple-verified COA dataset, source-binding, the three
 conflicting-COA logic, per-run folders, global report numbering. `ANALYSIS_VERSION` stays 15.1.0.
 Published findings on the standing dataset are unchanged.
 
-## Known next steps (tracked, not in this release)
-Count-invariant assertions + a coverage-gate review (pathogen/mercury zero-coverage surfaced more
-prominently), an OCR/coverage visibility pass, a regression test suite, and caching the live source
-*documents* (text + SHA-256) for full offline provenance.
+## Tests
+`_test_report_integrity.py` — 23 checks (parse_date, P1 count invariants, P4 version consistency,
+ledger citations, source-document provenance incl. the regulation PDF, and rendered-PDF checks for
+V15 leaks / all-UNVERIFIED / split integers / provenance + SHA-256). All pass.

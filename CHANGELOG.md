@@ -17,6 +17,11 @@ findings unchanged. All prior releases remain live.
 - `CT_REG_CITATIONS`, `CT_REG_AS_OF`, and `reg_corroboration()` (counts dataset COAs printing each
   applied limit). Live-first: where CT has no single number (heavy metals vary by product type) the
   report defers to each COA's own printed limit.
+- **`fetch-standards` subcommand + embedded source-document ledger** — downloads each cited CT source
+  (incl. the §21a-408-58 regulation PDF), extracts text via the pdfium→pdfplumber→OCR pipeline,
+  SHA-256-hashes the raw bytes, and stores them in `CT Regulatory Ledger.json` (embedded + auto-seeded)
+  for offline forensic provenance. New "Cached source-document provenance" table renders URL, size,
+  method, text length, and content hash per source.
 
 ### Fixed
 - **P0 rendering**: disabled ReportLab character-level word-splitting on the base cell + header styles

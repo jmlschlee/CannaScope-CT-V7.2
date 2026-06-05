@@ -59,6 +59,18 @@ check("ledger has citations for all categories",
       all(k in src.CT_REG_CITATIONS for k in ("yeast_mold", "aerobic", "pathogens", "heavy_metals", "thc_potency")))
 check("ledger citations carry a URL", all(c[1].startswith("http") for c in src.CT_REG_CITATIONS.values()))
 
+# ---- source-document provenance ledger (fetch-standards): if built, entries carry a SHA-256 ----
+_led = src.load_reg_ledger()
+if _led.get("sources"):
+    oks = [s for s in _led["sources"] if s.get("ok")]
+    check("provenance ledger entries carry sha256 + raw text",
+          all(len(s.get("sha256", "")) == 64 and s.get("text_len", 0) > 0 for s in oks),
+          f"{len(oks)} ok sources")
+    check("provenance ledger captured the regulation PDF",
+          any(s.get("method", "").startswith("pdf") and s.get("ok") for s in _led["sources"]))
+else:
+    print("INFO provenance ledger not built yet (run: fetch-standards) — skipping ledger-content checks")
+
 # ---- rendered-PDF checks (P0/P4) — only if a PDF path is supplied ----
 pdf = None
 if len(sys.argv) > 1 and os.path.exists(sys.argv[1]):
@@ -83,6 +95,9 @@ if pdf:
         # P0: an integer split across lines extracts as a lone digit on its own line between digits.
         lone_digit_runs = len(re.findall(r"(?m)^\s*\d\s*$\n^\s*\d\s*$", txt))
         check("P0 no obvious split integers (lone-digit run-on lines)", lone_digit_runs == 0, f"runs={lone_digit_runs}")
+        # Source-document provenance (fetch-standards): present + a real SHA-256 shown.
+        check("provenance section present", "Cached source-document provenance" in txt)
+        check("provenance shows a SHA-256", "sha256:" in txt)
     except Exception as e:
         check("rendering checks ran", False, f"{type(e).__name__}: {e}")
 else:
