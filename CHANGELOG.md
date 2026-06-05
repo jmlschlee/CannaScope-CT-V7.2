@@ -2,7 +2,42 @@
 
 All notable changes to this project are documented here.
 
-## [15.1.3] — 2026-06-04 — CannaScope CT V15.1.3 — current release
+## [15.2.0] — 2026-06-05 — CannaScope CT V15.2 — current release
+
+Performance + data-durability release on top of V15.1.3. Detection/validation logic is unchanged
+(`ANALYSIS_VERSION` stays 15.1.0); this changes how COA data is stored and reused. All prior releases
+remain live and unchanged; nothing removed from the repository.
+
+### Added
+- **Persistent COA → measurement cache** (`coa_csv_cache.py`, opt-in `--csv-cache`) — each COA is
+  downloaded + read (incl. OCR) ONCE and its measurements saved to a spreadsheet-readable
+  `COA Data Cache.csv`; later runs reload measurements and recompute flags from them. Re-runs are ~8×
+  faster, and lowering `--threshold` re-flags previously-clean COAs from cache (no re-download/re-OCR).
+  Flags are never stored — they are recomputed each run. Invalidates a row only on schema change,
+  a changed registry COA URL, or a prior empty read.
+- **`build-cache` subcommand** — walks the whole registry, reads each COA once, and TRIPLE-verifies
+  every measurement (source-extracted + source-bound + CSV round-trip) before trusting it. Resumable,
+  checkpointed (atomic flush), no PDF. This release ships with the resulting triple-verified COA data
+  EMBEDDED, so the program comes with the validated measurements in hand (new/re-released COAs still
+  fetch live).
+- **Multi-product Consumer Concern report** — one combined PDF for several products
+  (`concern --products-json`), shared header + per-product sections, optional `--conditions` health
+  context (advisory only).
+
+### Changed
+- **Persistent OCR-text cache** — image-only COAs are OCR'd once ever (content-hash keyed); re-scans /
+  audit-cache / `--force-rescan` skip re-OCR.
+- **Auto-sized OCR concurrency** — default scales to `min(cores−2, 6)` (was a fixed 4); low-memory
+  serialize guard unchanged.
+- Concurrent sibling-COA fetch in the consumer report.
+- Declared version bumped to **15.2.0**.
+
+### Unchanged / preserved
+Detection thresholds, date-aware legal verification, the COA source-binding six-field triple-check,
+three-part potency review, conflicting-COA review, per-run report folders, and global report numbering.
+No files, branches, tags, or releases were deleted or renamed.
+
+## [15.1.3] — 2026-06-04 — CannaScope CT V15.1.3 
 
 Additive report-quality patch on top of V15.1.2. All prior releases remain live and unchanged;
 nothing was removed from the repository. This release fixes table rendering, an accuracy

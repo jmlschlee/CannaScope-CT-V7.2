@@ -13,6 +13,7 @@ def bin_blob(path):
 
 NAMES, V4, V5, WORKER = (blob('ct_cannabis_names.py'), blob('cannascope_ct_v4.py'),
                          blob('cannascope_ct_v5.py'), blob('cannascope_ocr_worker.py'))
+CC = blob('coa_csv_cache.py')   # COA->measurement cache (imports v4/v5; install AFTER them)
 
 # Embedded caches (baked to speed first-time use; base64 has no '%', so it is template-safe).
 _RD = 'CannaScope CT V15 - Statewide Transparency Reports'
@@ -28,6 +29,11 @@ REG_EPOCH = int(os.path.getmtime(REG_PATH))
 SKIP = bin_blob(SKIP_PATH) if os.path.exists(SKIP_PATH) else ''
 print(f"  embedded registry: {os.path.getsize(REG_PATH):,}B raw -> {len(REG):,}B b64 (snapshot epoch {REG_EPOCH})")
 print(f"  embedded skip-list: {(os.path.getsize(SKIP_PATH) if os.path.exists(SKIP_PATH) else 0):,}B raw -> {len(SKIP):,}B b64")
+# Triple-verified COA measurement cache (built by `build-cache`). Embedded if present so the program
+# ships WITH the validated COA data; empty otherwise (the program then builds it live on demand).
+COA_CACHE_PATH = os.path.join(_RD, 'COA Data Cache.csv')
+COA_CACHE = bin_blob(COA_CACHE_PATH) if os.path.exists(COA_CACHE_PATH) else ''
+print(f"  embedded COA cache: {(os.path.getsize(COA_CACHE_PATH) if os.path.exists(COA_CACHE_PATH) else 0):,}B raw -> {len(COA_CACHE):,}B b64")
 
 v9 = open('cannascope_ct_v15_src.py', encoding='utf-8').read()
 body = v9[v9.index('import argparse'):]
@@ -68,14 +74,15 @@ TWO REPORTS
   "output/consumer_concerns/". Reports are NEVER overwritten (numbered + timestamped).
 """
 import base64 as _b64, os as _os, sys as _sys, tempfile as _tmp, types as _types, zlib as _zlib
-_EMBEDDED = {"ct_cannabis_names": %(NAMES)r, "cannascope_ct_v4": %(V4)r, "cannascope_ct_v5": %(V5)r}
+_EMBEDDED = {"ct_cannabis_names": %(NAMES)r, "cannascope_ct_v4": %(V4)r, "cannascope_ct_v5": %(V5)r, "coa_csv_cache": %(CC)r}
 _OCR_WORKER_SRC_B64 = %(WORKER)r
 _EMBEDDED_REGISTRY_B64 = %(REG)r
 _EMBEDDED_REGISTRY_EPOCH = %(REG_EPOCH)d
 _EMBEDDED_SKIPLIST_B64 = %(SKIP)r
+_EMBEDDED_COA_CACHE_B64 = %(COA_CACHE)r
 def _install_embedded():
     base=_os.getcwd()
-    for name in ("ct_cannabis_names","cannascope_ct_v4","cannascope_ct_v5"):
+    for name in ("ct_cannabis_names","cannascope_ct_v4","cannascope_ct_v5","coa_csv_cache"):
         if name in _sys.modules: continue
         src=_zlib.decompress(_b64.b64decode(_EMBEDDED[name])).decode("utf-8")
         mod=_types.ModuleType(name); mod.__file__=_os.path.join(base,name+".py")
@@ -88,7 +95,7 @@ def _materialize_ocr_worker():
     except Exception: return ""
 _install_embedded()
 # ============================================================================
-''' % dict(NAMES=NAMES, V4=V4, V5=V5, WORKER=WORKER, REG=REG, REG_EPOCH=REG_EPOCH, SKIP=SKIP)
+''' % dict(NAMES=NAMES, V4=V4, V5=V5, CC=CC, WORKER=WORKER, REG=REG, REG_EPOCH=REG_EPOCH, SKIP=SKIP, COA_CACHE=COA_CACHE)
 out = HEADER + body
 open('CannaScope_CT_V15.py', 'w', encoding='utf-8').write(out)
 print(f'Wrote CannaScope_CT_V15.py ({len(out):,} bytes)')

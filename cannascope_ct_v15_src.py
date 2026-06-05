@@ -59,6 +59,14 @@ try:
 except ImportError:
     sys.exit("CannaScope CT V15 needs cannascope_ct_v5.py and cannascope_ct_v4.py beside it.")
 
+# Persistent COA->measurement cache (optional; --csv-cache). Imports v4/v5, so it must load after
+# them (self-contained: installed by _install_embedded before this body runs). Soft-fail: the cache
+# is opt-in, so a missing module must never block a normal run.
+try:
+    import coa_csv_cache as cc
+except Exception:
+    cc = None
+
 names = getattr(v4, "names", None)
 ProductV5 = v5.ProductV5
 
@@ -66,11 +74,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V15.1.3"
+APP_NAME = "CannaScope CT V15.2.0"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "15.1.3"
+SOFTWARE_VERSION = "15.2.0"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 
 # ============================================================================
@@ -309,6 +317,13 @@ SELF_IMPROVE_LOG = os.path.join(OUT_DIR, "Self-Improvement Log.json")
 # re-eval candidate — which is exactly the pre-V16 concern: records skipped before newer logic.)
 ANALYSIS_VERSION = "15.1.0"
 AUDIT_STAMPS = os.path.join(OUT_DIR, "Cache Audit Stamps.json")   # {coa_key: {analysis_version, result, n_findings, stamped_at}}
+# Persistent OCR-text cache: an image-only COA is OCR'd ONCE EVER (keyed by file content hash), so
+# re-scans / audit-cache / --force-rescan skip the expensive Apple-Vision subprocess. Only successful
+# (non-empty) OCR text is cached — genuinely unreadable COAs stay uncached so they are re-attempted.
+# OCR_CACHE_VERSION is part of every key: bump it to invalidate all entries when the render/OCR logic
+# changes materially (e.g. the escalating-DPI ladder).
+OCR_TEXT_CACHE = os.path.join(OUT_DIR, "OCR Text Cache.json")
+OCR_CACHE_VERSION = 1
 AUDIT_PROGRESS = "v16_cache_audit_progress.json"                  # repo-root resumable progress state (atomic)
 AUDIT_HANDOFF = "V16_CACHE_AUDIT_HANDOFF.md"                      # repo-root human-readable handoff
 # Report filenames now follow the PDF REPORT NAMING STANDARD (see report_filename / next_report_path):
@@ -501,10 +516,33 @@ def _seed_embedded_registry():
         pass
 
 
+COA_DATA_CACHE = os.path.join(OUT_DIR, "COA Data Cache.csv")
+
+
+def _seed_embedded_coa_cache():
+    """If a TRIPLE-VERIFIED COA measurement cache is embedded in this build AND there is no local
+    'COA Data Cache.csv' yet, write it to OUT_DIR so the program ships WITH the validated COA data
+    (each COA already downloaded + read + triple-verified). Never overwrites an existing (possibly
+    larger / fresher) cache; new/changed COAs are still fetched live and merged in on later runs."""
+    b64 = globals().get("_EMBEDDED_COA_CACHE_B64")
+    if not b64 or os.path.exists(COA_DATA_CACHE):
+        return
+    try:
+        import base64 as _b, zlib as _z
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(COA_DATA_CACHE, "wb") as f:
+            f.write(_z.decompress(_b.b64decode(b64)))
+        print("Seeded the COA measurement cache from the embedded triple-verified snapshot "
+              "(COA Data Cache.csv) — measurements load from cache; new/changed COAs still fetch live.")
+    except Exception:
+        pass
+
+
 def load_registry(session, refresh=False, offline=False):
     v5.OUT_DIR = OUT_DIR
     v5.REGISTRY_CACHE = REGISTRY_CACHE
     _seed_embedded_registry()   # no-op unless a snapshot is embedded and no cache exists yet
+    _seed_embedded_coa_cache()  # no-op unless a COA cache is embedded and none exists locally yet
     if offline:
         # OFFLINE: read the bundled/embedded registry cache directly, ignoring its age,
         # and never reach the network.
@@ -1166,9 +1204,19 @@ _OCR_SEM = threading.Semaphore(4)
 _OCR_LOCK = threading.Lock()
 _OCR_SERIALIZE = threading.Lock()    # forces OCR one-at-a-time when memory is critical
 _OCR_STATS = {"ok": 0, "crashes": 0, "timeouts": 0, "backoffs": 0,
-              "serialized_low_memory": 0, "proceeded_under_load": 0}
+              "serialized_low_memory": 0, "proceeded_under_load": 0,
+              "cache_hits": 0, "rescued_high_dpi": 0}
 _CPU = os.cpu_count() or 4
 _OCR_AVAILABLE = None      # parent-side cache: is any OCR engine installed?
+
+
+def _default_ocr_workers():
+    """Auto-sized OCR concurrency default: scale to the machine but stay conservative on memory
+    (Apple-Vision renders are memory-heavy; the adaptive backoff + low-memory serialize guard
+    further throttle under pressure). Cap at 6 so we never thrash. An explicit --ocr-workers wins."""
+    return min(max(_CPU - 2, 1), 6)
+
+
 # Overload thresholds. Memory is the dominant OCR-crash cause (rendering a PDF page
 # at 2x into a PIL image is memory-heavy; several parallel renders can OOM-kill a
 # worker and LOSE that COA), so memory is watched harder than CPU and gets a second,
@@ -1287,11 +1335,95 @@ def _adaptive_backoff():
             _OCR_STATS["proceeded_under_load"] += 1
 
 
+# ---- Persistent OCR-text cache (see OCR_TEXT_CACHE) -------------------------------------------
+# An image-only COA is OCR'd once ever, keyed by file CONTENT hash. Loaded lazily, written through
+# every few additions and flushed at exit, thread-safe so the scan's worker pool can share it.
+_OCR_CACHE = None
+_OCR_CACHE_LOCK = threading.Lock()
+_OCR_CACHE_DIRTY = 0
+_OCR_CACHE_FLUSH_EVERY = 25
+
+
+def _ocr_cache_load():
+    global _OCR_CACHE
+    if _OCR_CACHE is None:
+        try:
+            with open(OCR_TEXT_CACHE, encoding="utf-8") as f:
+                d = json.load(f)
+            _OCR_CACHE = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            _OCR_CACHE = {}
+    return _OCR_CACHE
+
+
+def _ocr_cache_key(src):
+    """Content-hash key (identical COAs share; a changed COA re-OCRs), namespaced by OCR_CACHE_VERSION
+    so bumping the version invalidates every entry. '' if the file can't be read."""
+    import hashlib
+    try:
+        h = hashlib.sha1()
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return f"{OCR_CACHE_VERSION}:{h.hexdigest()}"
+    except OSError:
+        return ""
+
+
+def _ocr_cache_flush(force=False):
+    global _OCR_CACHE_DIRTY
+    with _OCR_CACHE_LOCK:
+        if _OCR_CACHE is None or (_OCR_CACHE_DIRTY == 0 and not force):
+            return
+        try:
+            os.makedirs(OUT_DIR, exist_ok=True)
+            tmp = OCR_TEXT_CACHE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_OCR_CACHE, f)
+            os.replace(tmp, OCR_TEXT_CACHE)
+            _OCR_CACHE_DIRTY = 0
+        except OSError:
+            pass
+
+
+def _ocr_cache_get(key):
+    if not key:
+        return None
+    with _OCR_CACHE_LOCK:
+        return _ocr_cache_load().get(key)
+
+
+def _ocr_cache_put(key, text):
+    global _OCR_CACHE_DIRTY
+    if not key or not text:
+        return
+    with _OCR_CACHE_LOCK:
+        _ocr_cache_load()[key] = text
+        _OCR_CACHE_DIRTY += 1
+        due = _OCR_CACHE_DIRTY >= _OCR_CACHE_FLUSH_EVERY
+    if due:
+        _ocr_cache_flush()
+
+
+import atexit as _atexit
+_atexit.register(lambda: _ocr_cache_flush(force=True))
+
+
 def _isolated_ocr_pdf(src, max_pages: int = 6) -> str:
     """OCR one COA in a separate process group. A segfault, hang, or timeout takes
     down only that child (and any grandchildren) -> '' (the COA is treated as
-    unreadable and retried later) instead of taking down the scan."""
-    if not isinstance(src, str) or not os.path.exists(_OCR_WORKER):
+    unreadable and retried later) instead of taking down the scan. Successful OCR text
+    is cached persistently by content hash, so a re-scan never re-OCRs the same COA."""
+    if not isinstance(src, str):
+        return ""
+    key = _ocr_cache_key(src)
+    if key:                              # content-hash hit -> skip the Apple-Vision subprocess entirely
+        cached = _ocr_cache_get(key)
+        if cached is not None:
+            with _OCR_LOCK:
+                _OCR_STATS["cache_hits"] = _OCR_STATS.get("cache_hits", 0) + 1
+            return cached
+    if not os.path.exists(_OCR_WORKER):
         return ""
     if not _ocr_backend_available():    # no engine installed -> don't spawn a no-op child
         return ""
@@ -1324,6 +1456,7 @@ def _isolated_ocr_pdf(src, max_pages: int = 6) -> str:
                         _OCR_STATS["ok"] += 1
                         if scale > 2.0:
                             _OCR_STATS["rescued_high_dpi"] = _OCR_STATS.get("rescued_high_dpi", 0) + 1
+                    _ocr_cache_put(key, text)   # persist so this COA is never re-OCR'd
                     return text
                 continue                # empty at this DPI -> escalate to a higher-DPI retry
             with _OCR_LOCK:             # non-zero exit = native crash; a re-render won't help
@@ -1415,6 +1548,36 @@ def process_product(p, session, watch):
     except Exception as e:
         p.parse_note = f"processing error: {type(e).__name__}: {e}"[:160]
         return p
+
+
+def cached_or_v15(p, session, watch, cache, allow_network=True):
+    """--csv-cache wiring (thin adapter). HIT: rehydrate measurements from the CSV cache and reflag at
+    `watch` — no network, no OCR — restoring the report-fidelity extras (testing date, COA-validation
+    status). MISS: run V15's OWN process_product (full text-derived analysis: conflict inputs, format
+    profile, presence, validation) and cache its measurements + those extras. So a HIT product is
+    report-faithful, and lowering --threshold re-flags previously-clean COAs straight from cache."""
+    p._watch = watch
+    row = cache.fresh_row(p)
+    if row is not None:
+        rp = cache.rehydrate(row, watch)            # extras (testing_date/_coa_status) restored here
+        rp._watch = watch
+        rp._coa_present = True                       # we hold its measurements -> treat as fetched
+        if not getattr(rp, "_coa_status", ""):
+            rp._coa_status = MATCH_EXACT
+        if not getattr(rp, "testing_date", ""):
+            rp.testing_date = test_date(rp)
+        return rp
+    if not allow_network:
+        p.parse_note = "offline: COA not in CSV cache"
+        p._coa_status = MATCH_LINK_MISSING
+        return p
+    p = process_product(p, session, watch)
+    if bool(getattr(p, "analytes", None)) or bool(getattr(p, "cannabinoids", None)):
+        # Only cache a COA we actually read. Keep the report-fidelity extras that aren't measurements.
+        cache.put(p, method="v15", text_len=0, pdf_path=v4.cache_path(p),
+                  extra={"testing_date": getattr(p, "testing_date", "") or test_date(p),
+                         "_coa_status": getattr(p, "_coa_status", "") or ""})
+    return p
 
 
 def _process_product(p, session, watch):
@@ -6120,7 +6283,7 @@ def main_learn(argv=None):
     ap.add_argument("--offline", action="store_true",
                     help="use only cached COA PDFs + bundled registry (no network)")
     ap.add_argument("--no-ocr", action="store_true", help="force OCR off (skip image-only COAs)")
-    ap.add_argument("--ocr-workers", type=int, default=4)
+    ap.add_argument("--ocr-workers", type=int, default=_default_ocr_workers())
     ap.add_argument("--refresh-registry", action="store_true")
     args = ap.parse_args(argv)
 
@@ -6179,6 +6342,145 @@ def main_learn(argv=None):
         print(f"(could not write confidence report: {e})")
 
 
+def _triple_verify_coa(p, cache, watch):
+    """TRIPLE verification of one extracted COA before it is trusted in the cache. Returns an int 0-3:
+      (1) SOURCE-EXTRACTED — every value carries a raw token parsed from the COA's own text (never
+          fabricated; ND/limit/LOQ are not published as measurements);
+      (2) SOURCE-BOUND — validate_coa_row confirmed the COA actually belongs to this product
+          (registration / batch / identity match), i.e. _coa_status is publishable;
+      (3) ROUND-TRIP — the measurements reload from the CSV and reproduce byte-identical flags, so
+          the saved row reproduces the exact assessment.
+    A row is only marked fully ('triple') when all three hold."""
+    read = bool(getattr(p, "analytes", None) or getattr(p, "cannabinoids", None))
+    if not read:
+        return 0
+    has_raw = (any(isinstance(e, dict) and e.get("raw") for e in (p.analytes or {}).values())
+               or any(isinstance(e, dict) and e.get("raw") for e in (getattr(p, "cannabinoids", {}) or {}).values()))
+    bound = getattr(p, "_coa_status", "") in PUBLISHABLE
+    # round-trip: put a provisional row, reload it, compare flags + analytes
+    extra = {"testing_date": test_date(p), "_coa_status": getattr(p, "_coa_status", "") or ""}
+    cache.put(p, method="v15", text_len=0, pdf_path=v4.cache_path(p), extra=extra)
+    rt = False
+    rrow = cache.fresh_row(p)
+    if rrow is not None:
+        rp = cache.rehydrate(rrow, watch)
+        rt = (rp.analytes == p.analytes and rp.flags == p.flags
+              and getattr(rp, "thc_flags", []) == getattr(p, "thc_flags", []))
+    level = int(bool(has_raw)) + int(bool(bound)) + int(bool(rt))
+    extra["_verified"] = level
+    cache.put(p, method="v15", text_len=0, pdf_path=v4.cache_path(p), extra=extra)
+    return level
+
+
+def main_build_cache(argv=None):
+    """Walk the WHOLE product registry (as far back as it goes), download + read (incl. OCR) each COA
+    ONCE, TRIPLE-VERIFY its measurements, and save them to the persistent COA Data Cache.csv. No PDF
+    report is produced — this is the one-time data build that makes every later run cheap and lets the
+    threshold be changed without re-OCR. Resumable: a HIT (already cached, unchanged report_url) is
+    skipped instantly, so re-running continues where a previous build left off."""
+    migrate_legacy_out_dir()
+    if cc is None:
+        sys.exit("build-cache needs the coa_csv_cache module (embedded in this build).")
+    ap = argparse.ArgumentParser(prog="build-cache",
+                                 description=f"{APP_NAME} — full-registry COA measurement cache build")
+    ap.add_argument("--forms", choices=["flower", "inhalable", "all"], default="all")
+    ap.add_argument("--since", default="", help="earliest approval date YYYY-MM-DD (default: the whole registry)")
+    ap.add_argument("--until", default="", help="latest approval date YYYY-MM-DD (default: today)")
+    ap.add_argument("--threshold", type=int, default=v4.DEFAULT_WATCH)
+    ap.add_argument("--limit", type=int, default=0, help="cap products (0 = all)")
+    ap.add_argument("--workers", type=int, default=v4.DEFAULT_WORKERS)
+    ap.add_argument("--ocr-workers", type=int, default=_default_ocr_workers())
+    ap.add_argument("--offline", action="store_true")
+    ap.add_argument("--no-ocr", action="store_true")
+    ap.add_argument("--refresh-registry", action="store_true")
+    args = ap.parse_args(argv)
+
+    enable_safe_pdf_text()
+    if args.offline:
+        enable_offline_sources()
+    if args.no_ocr:
+        v4._OCR_BACKEND = ""
+    else:
+        enable_isolated_ocr(); set_ocr_concurrency(args.ocr_workers)
+    since = None
+    if args.since:
+        try: since = tuple(map(int, args.since.split("-")))
+        except ValueError: sys.exit("--since must be YYYY-MM-DD")
+    until = None
+    if args.until:
+        try: until = tuple(map(int, args.until.split("-")))
+        except ValueError: sys.exit("--until must be YYYY-MM-DD")
+    os.makedirs(OUT_DIR, exist_ok=True); os.makedirs(CACHE_DIR, exist_ok=True)
+    v4.CACHE_DIR = CACHE_DIR
+    if args.offline:
+        import requests; session = requests.Session()
+    else:
+        session = v4.make_session("", args.workers)
+    products = load_registry(session, refresh=args.refresh_registry, offline=args.offline)
+    before = len(products)
+    products = v4.prefilter(products, args.forms, since)
+    if until:
+        products = [p for p in products if v4.parse_date(p.approval_date) <= until]
+    if args.limit:
+        products = products[:args.limit]
+    if not products:
+        sys.exit("No products matched.")
+    years = sorted({v4.parse_date(p.approval_date)[0] for p in products if v4.parse_date(p.approval_date)[0]})
+    print(f"Building COA measurement cache over {len(products):,} of {before:,} registry products "
+          f"(approval years {years[0] if years else '?'}–{years[-1] if years else '?'}); "
+          f"{args.workers} download workers, {args.ocr_workers} OCR workers.")
+
+    cache = cc.CoaCsvCache()
+    print(f"  resuming from {len(cache):,} COAs already cached.")
+    watch = args.threshold
+    tally = {"cached": 0, "read": 0, "unread": 0, "triple": 0, "double": 0, "single": 0, "v0": 0}
+    lock = threading.Lock(); done = 0; t0 = time.time()
+
+    def _one(p):
+        row = cache.fresh_row(p)
+        if row is not None:
+            return "cached", 0
+        p2 = process_product(p, session, watch)
+        if bool(getattr(p2, "analytes", None)) or bool(getattr(p2, "cannabinoids", None)):
+            lvl = _triple_verify_coa(p2, cache, watch)
+            return "read", lvl
+        # unreadable / no extractable text — stamp as a non-trusted row so a later online run retries
+        cache.put(p2, method="none", text_len=0, pdf_path=v4.cache_path(p2),
+                  extra={"testing_date": test_date(p2), "_coa_status": getattr(p2, "_coa_status", "") or "",
+                         "_verified": 0})
+        return "unread", 0
+
+    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+        futs = {ex.submit(_one, p): p for p in products}
+        for fut in as_completed(futs):
+            try:
+                kind, lvl = fut.result()
+            except Exception:
+                kind, lvl = "unread", 0
+            with lock:
+                done += 1
+                tally[kind] = tally.get(kind, 0) + 1
+                if kind == "read":
+                    tally[{3: "triple", 2: "double", 1: "single", 0: "v0"}[lvl]] += 1
+                if done % 250 == 0 or done == len(products):
+                    cache.flush()
+                    print(f"  {done:,}/{len(products):,}  (cached-skip {tally['cached']:,} · "
+                          f"read {tally['read']:,} · unreadable {tally['unread']:,} · "
+                          f"triple-verified {tally['triple']:,}) {time.time()-t0:.0f}s", flush=True)
+    cache.flush()
+    n_trust = tally["triple"]
+    print("\n================ COA CACHE BUILD COMPLETE ================")
+    print(f"  Registry products walked : {len(products):,}")
+    print(f"  Already cached (skipped) : {tally['cached']:,}")
+    print(f"  Newly read this run      : {tally['read']:,}")
+    print(f"  Unreadable (queued)      : {tally['unread']:,}")
+    print(f"  TRIPLE-verified rows     : {tally['triple']:,}  (source-extracted + source-bound + round-trip)")
+    print(f"  Double / single / zero   : {tally['double']:,} / {tally['single']:,} / {tally['v0']:,}")
+    print(f"  COA Data Cache.csv       : {len(cache):,} COAs on file  ->  {cache.path}")
+    print("=========================================================")
+    return cache.path
+
+
 def main():
     migrate_legacy_out_dir()   # carry a pre-rename output folder over to OUT_DIR (cache + numbering)
     ap = argparse.ArgumentParser(description=f"{APP_NAME} — {REPORT_TITLE}")
@@ -6202,14 +6504,19 @@ def main():
     ap.add_argument("--keep-clean-pdfs", action="store_true",
                     help="keep EVERY COA PDF in the cache (not just flagged ones), building a "
                          "complete local 'sources' bundle for fast offline re-runs.")
+    ap.add_argument("--csv-cache", action="store_true",
+                    help="use the persistent COA->measurement cache (COA Data Cache.csv): each COA is "
+                         "downloaded + read (incl. OCR) ONCE; later runs reload measurements and "
+                         "recompute flags, so the whole window is covered cheaply AND lowering "
+                         "--threshold re-flags previously-clean COAs from cache (no re-OCR).")
     ap.add_argument("--offline", action="store_true",
                     help="never touch the network: use the bundled Registry Cache + cached COA "
                          "PDFs only. Seed the bundle first with one online run (use --keep-clean-pdfs).")
     ap.add_argument("--no-ocr", action="store_true",
                     help="force OCR OFF (image-only COAs are skipped). Default is crash-proof isolated OCR.")
     ap.add_argument("--ocr-isolated", action="store_true", help="(default) kept for backward compatibility")
-    ap.add_argument("--ocr-workers", type=int, default=4,
-                    help="max concurrent OCR subprocesses (overload guard; default 4)")
+    ap.add_argument("--ocr-workers", type=int, default=_default_ocr_workers(),
+                    help=f"max concurrent OCR subprocesses (overload guard; auto-sized default {_default_ocr_workers()})")
     args = ap.parse_args()
 
     # Leak-free text extraction is ALWAYS on (COA text is read even with --no-ocr).
@@ -6287,18 +6594,39 @@ def main():
                   "Findings are unchanged; 'reviewed' coverage is lower.")
         else:
             print("--fast-cached: no embedded skip-list snapshot in this build; running a full scan.")
+    # Optional persistent COA->measurement cache. When on, the WHOLE window is routed through the
+    # cache (HITs are instant), so clean COAs are covered every run and re-flag correctly at a new
+    # --threshold — instead of being silently skipped by the ledger.
+    csv_cache = None
+    if getattr(args, "csv_cache", False):
+        if cc is None:
+            print("--csv-cache requested but coa_csv_cache is unavailable; falling back to the ledger.")
+        else:
+            csv_cache = cc.CoaCsvCache()
+            print(f"  COA CSV cache: {len(csv_cache):,} COAs already extracted "
+                  "(HITs reload + re-flag from cache — no re-download, no re-OCR).")
     if getattr(args, "force_rescan", False):
         todo = list(products)   # --force-rescan: ignore the skip-list, reprocess everything in window
         print(f"--force-rescan: ignoring the skip-list — reprocessing ALL {len(todo)} products in the window.")
+    elif csv_cache is not None:
+        todo = list(products)   # --csv-cache: cover the whole window; cache HITs keep it cheap
+        print(f"--csv-cache: routing ALL {len(todo)} in-window COAs through the measurement cache.")
     else:
         todo = [p for p in products if v4.coa_key(p) not in ledger]
     print(f"Scanning {len(todo)} COAs with {args.workers} workers ...\n")
+
+    if csv_cache is not None:
+        def _worker(p):
+            return cached_or_v15(p, session, args.threshold, csv_cache, allow_network=not args.offline)
+    else:
+        def _worker(p):
+            return process_product(p, session, args.threshold)
 
     all_results, keep, failures = [], [], []
     new_clean = set(); lock = threading.Lock(); done = 0
     fetched = 0; broken = 0
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(process_product, p, session, args.threshold): p for p in todo}
+        futs = {ex.submit(_worker, p): p for p in todo}
         for fut in as_completed(futs):
             p = fut.result()
             with lock:
@@ -6353,6 +6681,9 @@ def main():
             print(f"  recovered {ocr_recovered} of {len(unread)} on retry "
                   f"({len(failures)} still unreadable).")
     _save_ledger(ledger | new_clean)
+    if csv_cache is not None:
+        csv_cache.flush()                          # atomic write of all measurements extracted this run
+        print(f"  COA CSV cache: {len(csv_cache):,} COAs on file now.")
 
     print("\nBuilding validated analytics ...")
     watch = args.threshold
@@ -6579,6 +6910,8 @@ def main():
         "ocr_timeouts": _OCR_STATS["timeouts"], "overload_backoffs": _OCR_STATS["backoffs"],
         "ocr_serialized_low_memory": _OCR_STATS["serialized_low_memory"],
         "ocr_proceeded_under_sustained_load": _OCR_STATS["proceeded_under_load"],
+        "ocr_cache_hits": _OCR_STATS.get("cache_hits", 0),
+        "ocr_rescued_high_dpi": _OCR_STATS.get("rescued_high_dpi", 0),
         "flagged_total": len(flagged),
         "flagged_published": len(pub),
         "coa_verification_queue": len(flagged) - len(pub),
@@ -7372,14 +7705,29 @@ def find_related_coas(primary_row, primary_p, rows, pin, session, watch,
         cands.append((same_product, same_size, same_form, dist, r, rp))
     cands.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
     chosen = [c for c in cands if c[3] <= window_days][:max_n] or cands[:max_n]
-    out = []
-    for same_product, same_size, same_form, dist, r, rp in chosen:
-        summ = _analyze_sibling(rp, pin, session, watch)
-        out.append(dict(row=r, p=rp, days_apart=(None if dist >= 10 ** 9 else dist),
-                        same_form=(same_form == 0), same_size=(same_size == 0),
-                        same_product=(same_product == 0), product=r.get("PRODUCT-NAME"),
-                        ndc=r.get(_NDC_COL, ""), **summ))
-    return out
+    if not chosen:
+        return []
+
+    def _do_one(tup):
+        # Fetch + analyze ONE sibling COA. Wrapped so a single bad sibling never breaks the report.
+        same_product, same_size, same_form, dist, r, rp = tup
+        try:
+            summ = _analyze_sibling(rp, pin, session, watch)
+        except Exception:
+            return None
+        return dict(row=r, p=rp, days_apart=(None if dist >= 10 ** 9 else dist),
+                    same_form=(same_form == 0), same_size=(same_size == 0),
+                    same_product=(same_product == 0), product=r.get("PRODUCT-NAME"),
+                    ndc=r.get(_NDC_COL, ""), **summ)
+
+    # Sibling COAs are independent network fetches — run them concurrently (downloads overlap; PDF
+    # parsing stays serialized under the engine's pdfium lock). Order is preserved by ex.map.
+    if len(chosen) == 1:
+        out = [_do_one(chosen[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(chosen), 6)) as ex:
+            out = list(ex.map(_do_one, chosen))
+    return [o for o in out if o is not None]
 
 
 def _consumer_report_path():
@@ -7392,8 +7740,15 @@ def _consumer_report_path():
     return path, report_no, dt
 
 
-def build_patient_pdf(out_path, pin, res, analysis, report_no=None, report_dt=None):
-    """Render the personalized, patient-friendly PDF. Portrait letter."""
+def build_patient_pdf(out_path, pin, res, analysis, report_no=None, report_dt=None,
+                      *, return_story=False, include_cover=True, include_footer=True):
+    """Render the personalized, patient-friendly PDF. Portrait letter.
+
+    return_story=True  -> build the per-product flowables and RETURN them (no file written), so a
+                          combined multi-product report can concatenate several products into one PDF.
+    include_cover      -> emit the report cover (set False for a product SECTION inside a combined report).
+    include_footer     -> emit the shared 'What to do next' / lead-not-conclusion footer (set False on
+                          every product section except the last in a combined report)."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import ParagraphStyle
@@ -7455,15 +7810,16 @@ def build_patient_pdf(out_path, pin, res, analysis, report_no=None, report_dt=No
     bigmeta = ParagraphStyle("bigmeta", parent=sub_st, fontName=BFB, fontSize=13, leading=18, textColor=NAVY)
 
     story = []
-    story.append(Paragraph(esc(APP_NAME), title_st))                                    # CannaScope CT V15
-    if report_no is not None:
-        story.append(Paragraph(f"Report #{report_no}", bigmeta))                        # Report #16
-    story.append(Paragraph("Consumer Concern Report", bigmeta))                         # Consumer Concern Report
-    story.append(Paragraph(f"Created {esc(cover_date)}", small))                        # Created June 3, 2026
-    story.append(Paragraph(esc(cover_time), small))                                     # 5:36 PM EDT
-    story.append(Spacer(1, 4))
-    story.append(Paragraph("A personalized review of one product's lab-testing data, for a consumer concern.", sub_st))
-    story.append(Spacer(1, 8))
+    if include_cover:
+        story.append(Paragraph(esc(APP_NAME), title_st))                                # CannaScope CT V15
+        if report_no is not None:
+            story.append(Paragraph(f"Report #{report_no}", bigmeta))                    # Report #16
+        story.append(Paragraph("Consumer Concern Report", bigmeta))                     # Consumer Concern Report
+        story.append(Paragraph(f"Created {esc(cover_date)}", small))                    # Created June 3, 2026
+        story.append(Paragraph(esc(cover_time), small))                                 # 5:36 PM EDT
+        story.append(Spacer(1, 4))
+        story.append(Paragraph("A personalized review of one product's lab-testing data, for a consumer concern.", sub_st))
+        story.append(Spacer(1, 8))
 
     # ---- PRODUCT OF CONCERN header (item 1): the investigated product, up top + prominent ----
     poc_name = pin.get("product") or row.get("PRODUCT-NAME") or "(not specified)"
@@ -7926,26 +8282,152 @@ def build_patient_pdf(out_path, pin, res, analysis, report_no=None, report_dt=No
             story.append(Spacer(1, 3))
             story.append(Paragraph(f'<b>{esc(c["rule_category"])}.</b> {esc(c["finding"])}', body))
 
-    # 6) Safety framing / next steps
-    story.append(Paragraph("What to do next", h_st))
-    story.append(banner(
-        "This analysis is informational and not medical advice. Testing results near or over a limit "
-        "do not prove that a product caused any symptom. If you feel unwell or have a health concern, "
-        "please contact a healthcare provider or pharmacist. To report a product concern in "
-        "Connecticut, you can contact the <b>CT Office of the Cannabis Ombudsman</b> and the "
-        "<b>Department of Consumer Protection (DCP)</b>. Keep your product, packaging, and this "
-        "document in case they are helpful.",
-        colors.HexColor("#e7f0ff"), colors.HexColor("#1b3a6b")))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        "Every flag in this document is a lead, not a conclusion. Values are drawn from the product's "
-        "Certificate of Analysis and the Connecticut product registry; anything that could not be "
-        "confirmed is shown as not found rather than estimated.", small))
+    # 6) Safety framing / next steps (shared footer — in a combined report it is shown ONCE, at the end)
+    if include_footer:
+        story.append(Paragraph("What to do next", h_st))
+        story.append(banner(
+            "This analysis is informational and not medical advice. Testing results near or over a limit "
+            "do not prove that a product caused any symptom. If you feel unwell or have a health concern, "
+            "please contact a healthcare provider or pharmacist. To report a product concern in "
+            "Connecticut, you can contact the <b>CT Office of the Cannabis Ombudsman</b> and the "
+            "<b>Department of Consumer Protection (DCP)</b>. Keep your product, packaging, and this "
+            "document in case they are helpful.",
+            colors.HexColor("#e7f0ff"), colors.HexColor("#1b3a6b")))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            "Every flag in this document is a lead, not a conclusion. Values are drawn from the product's "
+            "Certificate of Analysis and the Connecticut product registry; anything that could not be "
+            "confirmed is shown as not found rather than estimated.", small))
 
+    if return_story:
+        return story
     SimpleDocTemplate(out_path, pagesize=letter, leftMargin=0.7*inch, rightMargin=0.7*inch,
                       topMargin=0.6*inch, bottomMargin=0.7*inch,
                       title="Personalized Product Concern Report",
                       author=APP_NAME).build(story)
+
+
+def build_patient_pdf_multi(out_path, items, shared, report_no=None, report_dt=None):
+    """ONE combined Consumer Concern Report covering MULTIPLE products. Renders a shared cover, the
+    consumer's reported health context, a combined at-a-glance summary, then one self-contained section
+    per product (reusing build_patient_pdf in section mode). `items` = list of {pin, res, analysis};
+    `shared` = cross-product context (conditions, concern). The 'What to do next' footer shows ONCE."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak)
+
+    BF, BFB = v4._setup_fonts()
+    esc = v4._esc
+    NAVY = colors.HexColor("#1F2D3D")
+    title_st = ParagraphStyle("mt", fontName=BFB, fontSize=18, leading=22, textColor=NAVY)
+    sub_st = ParagraphStyle("ms", fontName=BF, fontSize=11, leading=15, textColor=colors.HexColor("#444"))
+    bigmeta = ParagraphStyle("mbm", parent=sub_st, fontName=BFB, fontSize=13, leading=18, textColor=NAVY)
+    small = ParagraphStyle("msm", fontName=BF, fontSize=8.5, leading=11.5, textColor=colors.HexColor("#555"))
+    cell = ParagraphStyle("mc", fontName=BF, fontSize=9, leading=12)
+    cellb = ParagraphStyle("mcb", parent=cell, fontName=BFB)
+    head = ParagraphStyle("mhd", fontName=BFB, fontSize=9, leading=12, textColor=colors.white)
+    secth = ParagraphStyle("msec", fontName=BFB, fontSize=12.5, leading=15, textColor=colors.white)
+    boxst = ParagraphStyle("mbx", fontName=BF, fontSize=9.5, leading=13, textColor=colors.HexColor("#6b4e00"))
+
+    def _box(text, fill, brd):
+        t = Table([[Paragraph(text, boxst)]], colWidths=[7.0 * inch])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), fill), ("BOX", (0, 0), (-1, -1), 0.6, brd),
+                               ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                               ("LEFTPADDING", (0, 0), (-1, -1), 9), ("RIGHTPADDING", (0, 0), (-1, -1), 9)]))
+        return t
+
+    def _band(text):
+        t = Table([[Paragraph(text, secth)]], colWidths=[7.0 * inch])
+        t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), NAVY), ("TOPPADDING", (0, 0), (-1, -1), 7),
+                               ("BOTTOMPADDING", (0, 0), (-1, -1), 7), ("LEFTPADDING", (0, 0), (-1, -1), 10)]))
+        return t
+
+    _now = report_dt or datetime.datetime.now().astimezone()
+    cover_date = f"{_now:%B} {_now.day}, {_now.year}"
+    _h12 = _now.hour % 12 or 12
+    cover_time = f"{_h12}:{_now.minute:02d} {'AM' if _now.hour < 12 else 'PM'} {_now.strftime('%Z')}".strip()
+    n = len(items)
+
+    story = []
+    story.append(Paragraph(esc(APP_NAME), title_st))
+    if report_no is not None:
+        story.append(Paragraph(f"Report #{report_no}", bigmeta))
+    story.append(Paragraph(f"Consumer Concern Report — {n} Products", bigmeta))
+    story.append(Paragraph(f"Created {esc(cover_date)}", small))
+    story.append(Paragraph(esc(cover_time), small))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(f"A single combined review of {n} products' lab-testing data, for one consumer's "
+                           "concern. Each product is reviewed independently in its own section below.", sub_st))
+    story.append(Spacer(1, 10))
+
+    # ---- Consumer-reported health context (informational only; NOT medical advice) ----
+    conds = (shared.get("conditions") or "").strip()
+    concern = (shared.get("concern") or "").strip()
+    if conds or concern:
+        lines = []
+        if conds:
+            lines.append(f"<b>Pre-existing conditions the consumer reported:</b> {esc(conds)}.")
+        if concern:
+            lines.append(f"<b>Consumer's stated concern:</b> {esc(concern)}.")
+        lines.append("This health context was provided by the consumer and is recorded here for the reviewer's "
+                     "awareness only. It is <b>not independently verified</b>, it is <b>not medical advice</b>, and "
+                     "it does <b>not</b> change how the products' lab results are analyzed below. CannaScope does not "
+                     "diagnose, assess medical risk, or link any product to any health condition. A consumer with a "
+                     "health concern should speak with a qualified healthcare provider or pharmacist.")
+        story.append(Paragraph("Consumer-Reported Health Context", ParagraphStyle("mhc", parent=bigmeta, fontSize=12)))
+        story.append(_box("<br/>".join(lines), colors.HexColor("#fff7e6"), colors.HexColor("#d9a441")))
+        story.append(Spacer(1, 10))
+
+    # ---- Combined at-a-glance summary across the N products ----
+    story.append(Paragraph("Products in This Report", ParagraphStyle("mph", parent=bigmeta, fontSize=12)))
+    hdr = [Paragraph(h, head) for h in ("#", "Product", "Resolved via", "COA", "Items flagged for review")]
+    rows_t = [hdr]
+    for i, it in enumerate(items, 1):
+        rr = it["res"].get("row") or {}
+        nm = it["pin"].get("product") or rr.get("PRODUCT-NAME") or f"Product {i}"
+        rv = it["res"].get("lookup_path") or ("not resolved" if not rr else "—")
+        coa_ok = "Yes" if it["analysis"].get("coa_url") else "No"
+        # Distinguish a contaminant result (any_flag) from a lab-reporting review note (compliance,
+        # e.g. the cannabinoid-total math check) so the summary isn't misleading.
+        if it["analysis"].get("any_flag"):
+            flagged, fcol = "Yes — contaminant result(s)", "#C0392B"
+        elif it["analysis"].get("compliance"):
+            flagged, fcol = "Review note — see section", "#9A7B0A"
+        else:
+            flagged, fcol = "No", "#1E7E34"
+        rows_t.append([Paragraph(f"<b>{i}</b>", ParagraphStyle("mcc", parent=cell, alignment=1)),
+                       Paragraph(esc(tcase(nm)), cell), Paragraph(esc(rv), cell),
+                       Paragraph(esc(coa_ok), ParagraphStyle("mcc2", parent=cell, alignment=1)),
+                       Paragraph(f'<font color="{fcol}"><b>{flagged}</b></font>', cell)])
+    st = Table(rows_t, colWidths=[0.35*inch, 2.7*inch, 1.85*inch, 0.55*inch, 1.55*inch], repeatRows=1)
+    st.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), NAVY),
+                            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cfd6dd")),
+                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f3f6f8")]),
+                            ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6)]))
+    story.append(st)
+    story.append(Spacer(1, 4))
+    story.append(Paragraph('"Items flagged for review" is a lead to verify, not a conclusion — it can include a '
+                           "lab-reporting/transcription oddity (e.g. cannabinoid totals) and is not the same as a "
+                           "contaminant failure. See each product's section for the specifics.", small))
+
+    # ---- One self-contained section per product (reuse build_patient_pdf in section mode) ----
+    for k, it in enumerate(items):
+        story.append(PageBreak())
+        rr = it["res"].get("row") or {}
+        nm = it["pin"].get("product") or rr.get("PRODUCT-NAME") or f"Product {k+1}"
+        story.append(_band(f"Concern {k+1} of {n}: {esc(tcase(nm))}"))
+        story.append(Spacer(1, 6))
+        story.extend(build_patient_pdf(None, it["pin"], it["res"], it["analysis"],
+                                       report_no=report_no, report_dt=_now,
+                                       return_story=True, include_cover=False, include_footer=(k == n - 1)))
+
+    SimpleDocTemplate(out_path, pagesize=letter, leftMargin=0.7*inch, rightMargin=0.7*inch,
+                      topMargin=0.6*inch, bottomMargin=0.7*inch,
+                      title=f"Consumer Concern Report — {n} Products", author=APP_NAME).build(story)
 
 
 _EXAMPLE_FIXTURE = dict(
@@ -7975,10 +8457,15 @@ def main_patient(argv=None):
     ap.add_argument("--tested", default=""); ap.add_argument("--exp", default="")
     ap.add_argument("--thca", type=float, default=None); ap.add_argument("--thc", type=float, default=None)
     ap.add_argument("--concern", default="", help="the patient's stated concern")
+    ap.add_argument("--conditions", default="",
+                    help="consumer's reported pre-existing conditions (noted as context; not medical advice)")
+    ap.add_argument("--products-json", default="",
+                    help="path to a JSON array of product objects (product/ndc/batch/uid/coa/qr/...) to "
+                         "review MULTIPLE products in ONE combined report")
     ap.add_argument("--example", action="store_true",
                     help="run the built-in Nutmeg New Britain test fixture")
     ap.add_argument("--threshold", type=int, default=v4.DEFAULT_WATCH)
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=_default_ocr_workers())
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--no-ocr", action="store_true")
     ap.add_argument("--no-related", action="store_true",
@@ -7988,8 +8475,11 @@ def main_patient(argv=None):
     ap.add_argument("--related-window-days", type=int, default=PATIENT_RELATED_WINDOW_DAYS,
                     help=f"time window for 'close enough' siblings (default {PATIENT_RELATED_WINDOW_DAYS})")
     args = ap.parse_args(argv)
+    multi = bool(args.products_json)
 
-    if args.example:
+    if multi:
+        pin = None                       # multi-product mode builds a pin per product from the JSON
+    elif args.example:
         pin = dict(_EXAMPLE_FIXTURE)
     else:
         pin = dict(product=args.product, cultivator=args.cultivator, batch=args.batch,
@@ -7999,7 +8489,7 @@ def main_patient(argv=None):
         if not any(pin.get(k) for k in ("product", "cultivator", "batch", "ndc_stated",
                                         "ndc_label", "uid", "coa", "qr")):
             ap.error("provide at least one identifier (e.g. --ndc, --batch, --qr, --product), "
-                     "or use --example for the built-in test case.")
+                     "use --products-json for several products, or --example for the built-in test case.")
 
     enable_safe_pdf_text()
     if args.offline:
@@ -8018,36 +8508,69 @@ def main_patient(argv=None):
     v4.CACHE_DIR = CACHE_DIR
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    print("Resolving the product from the identifiers you provided ...")
     rows = _patient_registry_rows(session, offline=args.offline)
-    res = resolve_patient_product(rows, pin, session=session, offline=args.offline)
-    if res["row"]:
-        print(f"  Resolved via: {res['lookup_path']}  ({', '.join(res['matched_on'])})")
-        if res["conflicts"]:
-            print(f"  Discrepancies surfaced: {len(res['conflicts'])}")
-    else:
-        print("  Could not confidently resolve the product — the PDF will explain what is missing.")
 
-    analysis = None
-    if res["row"]:
-        print("Fetching and parsing the COA ...")
-        p = _row_to_product(res["row"])
-        analysis = analyze_patient_product(p, pin, session, args.threshold, offline=args.offline)
-        print(f"  COA {'parsed' if analysis['coa_fetched'] else 'not retrieved'}; "
-              f"flags present: {analysis['any_flag']}")
-        if not args.no_related:
-            print("Looking up related/sibling COAs from the same producer ...")
-            analysis["related"] = find_related_coas(
-                res["row"], p, rows, pin, session, args.threshold,
-                max_n=args.related_n, window_days=args.related_window_days, offline=args.offline)
-            print(f"  {len(analysis['related'])} related COA(s) linked"
-                  + (f"; {sum(1 for s in analysis['related'] if s['idmatch'])} match an ID on the package"
-                     if any(s['idmatch'] for s in analysis['related']) else ""))
-    else:
-        analysis = dict(coa_fetched=False, classes={}, pathogens=[], compliance=[],
-                        corroboration=[], coa_url="", testing_date="", parse_note="",
-                        coa_status="", pesticide_panel="", solvent_panel="", any_flag=False, p=None)
+    def _resolve_one(pin_one, *, verbose=True):
+        """Resolve + analyze ONE product (+ siblings). Returns (res, analysis). Shared by the
+        single-product and multi-product paths so they behave identically per product."""
+        res_one = resolve_patient_product(rows, pin_one, session=session, offline=args.offline)
+        if verbose:
+            if res_one["row"]:
+                print(f"  Resolved via: {res_one['lookup_path']}  ({', '.join(res_one['matched_on'])})")
+                if res_one["conflicts"]:
+                    print(f"  Discrepancies surfaced: {len(res_one['conflicts'])}")
+            else:
+                print("  Could not confidently resolve the product — the PDF will explain what is missing.")
+        if res_one["row"]:
+            p_one = _row_to_product(res_one["row"])
+            ana_one = analyze_patient_product(p_one, pin_one, session, args.threshold, offline=args.offline)
+            if verbose:
+                print(f"  COA {'parsed' if ana_one['coa_fetched'] else 'not retrieved'}; "
+                      f"flags present: {ana_one['any_flag']}")
+            if not args.no_related:
+                ana_one["related"] = find_related_coas(
+                    res_one["row"], p_one, rows, pin_one, session, args.threshold,
+                    max_n=args.related_n, window_days=args.related_window_days, offline=args.offline)
+        else:
+            ana_one = dict(coa_fetched=False, classes={}, pathogens=[], compliance=[],
+                           corroboration=[], coa_url="", testing_date="", parse_note="",
+                           coa_status="", pesticide_panel="", solvent_panel="", any_flag=False, p=None)
+        return res_one, ana_one
 
+    # ---- MULTI-PRODUCT: one combined report covering several products ----
+    if multi:
+        try:
+            with open(args.products_json, encoding="utf-8") as f:
+                specs = json.load(f)
+        except (OSError, ValueError) as e:
+            ap.error(f"could not read --products-json '{args.products_json}': {e}")
+        if not isinstance(specs, list) or not specs:
+            ap.error("--products-json must be a non-empty JSON array of product objects.")
+        print(f"Reviewing {len(specs)} products into ONE combined Consumer Concern Report ...")
+        items = []
+        for i, sp in enumerate(specs, 1):
+            pin_i = dict(product=sp.get("product", ""), cultivator=sp.get("cultivator", ""),
+                         batch=sp.get("batch", ""), ndc_stated=sp.get("ndc", "") or sp.get("ndc_stated", ""),
+                         ndc_label=sp.get("ndc_label", ""), uid=sp.get("uid", ""), coa=sp.get("coa", ""),
+                         qr=sp.get("qr", ""), harvest=sp.get("harvest", ""), packaged=sp.get("packaged", ""),
+                         tested=sp.get("tested", ""), exp=sp.get("exp", ""), thca=sp.get("thca"),
+                         thc=sp.get("thc"), concern=sp.get("concern", args.concern))
+            print(f"  [{i}/{len(specs)}] {pin_i.get('product') or pin_i.get('ndc_stated') or 'product'} ...")
+            res_i, ana_i = _resolve_one(pin_i, verbose=False)
+            print(f"      {('resolved via ' + res_i['lookup_path']) if res_i['row'] else 'NOT resolved'}"
+                  + (f"; items flagged: {ana_i.get('any_flag')}" if res_i["row"] else ""))
+            items.append(dict(pin=pin_i, res=res_i, analysis=ana_i))
+        shared = dict(conditions=args.conditions, concern=args.concern)
+        out_path, report_no, run_dt = _consumer_report_path()
+        if os.path.exists(out_path):
+            raise SystemExit(f"FATAL: consumer report #{report_no} would overwrite an existing file: {out_path}")
+        build_patient_pdf_multi(out_path, items, shared, report_no, run_dt)
+        print(f"\nWrote combined ConsumerConcern report #{report_no} ({len(items)} products):\n  {out_path}")
+        return out_path
+
+    # ---- SINGLE PRODUCT (unchanged behavior) ----
+    print("Resolving the product from the identifiers you provided ...")
+    res, analysis = _resolve_one(pin)
     out_path, report_no, run_dt = _consumer_report_path()
     # Numbering integrity — global, continuous, never reused/overwritten (same guard as statewide).
     if os.path.exists(out_path):
@@ -8070,6 +8593,8 @@ if __name__ == "__main__":
         main_learn(sys.argv[2:])
     elif _sub in ("audit-cache", "audit", "recache", "cache-audit"):
         main_audit(sys.argv[2:])
+    elif _sub in ("build-cache", "build-coa-cache", "cache-build"):
+        main_build_cache(sys.argv[2:])
     elif _sub in ("statewide", "report", "market"):
         sys.argv = [sys.argv[0]] + sys.argv[2:]   # strip the subcommand for main()'s argparse
         main()
