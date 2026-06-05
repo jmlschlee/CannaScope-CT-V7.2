@@ -2,7 +2,39 @@
 
 All notable changes to this project are documented here.
 
-## [15.2.0] — 2026-06-05 — CannaScope CT V15.2 — current release
+## [16.0.0] — 2026-06-05 — CannaScope CT V16 — current release
+
+The data-integrity release: a persistent **triple-verified COA measurement dataset** (≈33,692 COAs,
+2015–2026) baked into the program, plus six engine parser-accuracy fixes audited against the real
+source COAs (misread rate **1.26% → 0.000%**). `ANALYSIS_VERSION` stays 15.1.0 (detection logic
+unchanged). All prior releases remain live and unchanged; nothing removed.
+
+### Fixed (parser accuracy — root-cause, in the V4/V5 engine)
+- Below-detection `<X` no longer dropped as the limit (comparator token is always a result).
+- Bare value == its own action limit → conservative below-limit bound (generic AND detail-table paths).
+- Microbial CFU/g ≥ 1e11 rejected as an OCR artifact (e.g. a garbled `4e14` that would fire a false RED).
+- Δ9-THC no longer matches the “THC” inside “THC-A” (was duplicating THCA into THC → Total THC >100%).
+- A derived Total THC >100% (impossible) → drop the COA’s THC potency as not-reliably-readable.
+- Net: limit-as-value 1.26%→0.000%, cannabinoid>100% 192→0, storage fidelity 100%, no false negatives.
+
+### Added
+- **Persistent COA→measurement cache** (`coa_csv_cache.py`, opt-in `--csv-cache`) — each COA read once;
+  later runs reload measurements and recompute flags (~8× faster re-runs; threshold re-flag from cache).
+- **`build-cache` subcommand** — full-registry analyze → TRIPLE-verify (source-extracted + source-bound
+  + round-trip) → save CSV. The resulting dataset (33,692 COAs · 32,721 triple-verified) is **embedded**
+  in the build and auto-seeds on first run.
+- **Multi-product Consumer Concern report** (`concern --products-json`, optional `--conditions`).
+- Persistent OCR-text cache; auto-sized OCR concurrency; concurrent sibling-COA fetch.
+
+### Changed
+- Streamlit web app updated to V16. Version → **16.0.0**.
+
+### Unchanged / preserved
+Detection thresholds, date-aware legal verification, six-field COA source-binding, three-part potency
+review, conflicting-COA review, per-run folders, global report numbering. No files/branches/tags/
+releases deleted or renamed.
+
+## [15.2.0] — 2026-06-05 — CannaScope CT V15.2 
 
 Performance + data-durability release on top of V15.1.3. Detection/validation logic is unchanged
 (`ANALYSIS_VERSION` stays 15.1.0); this changes how COA data is stored and reused. All prior releases

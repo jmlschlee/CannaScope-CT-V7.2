@@ -30,7 +30,9 @@ import cannascope_ct_v5 as v5
 
 # Bump to force a one-time rebuild of every cached row (e.g. if the parse/measurement shape changes).
 # v2: added the triple-verification stamp (_verified in _extra) written by the build-cache pass.
-SCHEMA = 2
+# v3: engine fix — below-detection results ("<20") and two-column "Results | Limits" rows are no
+#     longer misread as at-limit measurements; forces a full re-extraction so cached values are correct.
+SCHEMA = 5
 
 # One row per COA. Flat scalar columns first (human/spreadsheet readable), then lossless JSON
 # columns, then meta. Flags / thc_flags are deliberately NOT stored — they are recomputed by

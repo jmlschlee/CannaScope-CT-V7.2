@@ -1,8 +1,8 @@
 """
-CannaScope CT V15.1 — Streamlit front end (consumer-friendly).
+CannaScope CT V16.0.0 — Streamlit front end (consumer-friendly).
 
 Deploys on Streamlit Community Cloud from the repo's deploy branch (main). It drives the REAL
-current V15 program (auto-detected: cannascope_ct_v15_src.py, else CannaScope_CT_V15.py) to
+current program (auto-detected: cannascope_ct_v15_src.py, else CannaScope_CT_V16.py) to
 generate a PDF, then serves it via st.download_button — so it never relies on a permanent server
 folder. Work per click is kept LIGHT (one-product lookup, or a small capped statewide sample);
 no full multi-thousand scans or cache rebuilds happen on a click. Friendly errors, no stack
@@ -16,11 +16,11 @@ import time
 
 import streamlit as st
 
-st.set_page_config(page_title="CannaScope CT V15.1", page_icon="🌿", layout="centered")
+st.set_page_config(page_title="CannaScope CT V16.0.0", page_icon="🌿", layout="centered")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Detect the real current V15 program file — do not guess.
-_CANDIDATES = ["cannascope_ct_v15_src.py", "CannaScope_CT_V15.py"]
+# Detect the real current program file — do not guess.
+_CANDIDATES = ["cannascope_ct_v15_src.py", "CannaScope_CT_V16.py", "CannaScope_CT_V15.py"]
 SCRIPT = next((c for c in _CANDIDATES if os.path.exists(os.path.join(HERE, c))), None)
 
 STATEWIDE_DIR = "CannaScope CT V15 - Statewide Transparency Reports"
@@ -39,9 +39,9 @@ def _newest_pdf(base, since):
 
 
 def run_report(args, output_base, label):
-    """Run the V15 program as an isolated subprocess and return (ok, pdf_path_or_None, message)."""
+    """Run the program as an isolated subprocess and return (ok, pdf_path_or_None, message)."""
     if not SCRIPT:
-        return False, None, "The CannaScope V15 program file was not found next to this app."
+        return False, None, "The CannaScope program file was not found next to this app."
     since = time.time()
     try:
         proc = subprocess.run([sys.executable, SCRIPT, *args], cwd=HERE,
@@ -63,13 +63,13 @@ def run_report(args, output_base, label):
 
 # ---------------------------------------------------------------- UI
 st.title("🌿 CannaScope CT")
-st.caption("V15.1 · Source-verified Connecticut cannabis transparency reports")
+st.caption("V16.0.0 · Source-verified Connecticut cannabis transparency reports · triple-verified COA data")
 st.info("**Advisory tool — not medical, legal, or professional advice, and not affiliated with the "
         "State of Connecticut.** Every result is a *lead to verify, not a conclusion.* Always confirm "
         "against the official, live Certificate of Analysis (COA).", icon="ℹ️")
 
 if not SCRIPT:
-    st.error("Setup issue: the CannaScope V15 program file isn't deployed alongside this app. "
+    st.error("Setup issue: the CannaScope program file isn't deployed alongside this app. "
              "Make sure `cannascope_ct_v15_src.py` (and its engine files) are on the deploy branch.")
     st.stop()
 

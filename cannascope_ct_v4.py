@@ -175,7 +175,12 @@ POS_RE = re.compile(r"\bdetected\b|\bpositive\b|\bpresent\b|\bfail", re.I)
 FOOTNOTE_RE = re.compile(
     r"analyzed\s+per|are\s+analyzed|analyzed\s+by|method|protocol|\bSOP\b"
     r"|per\s+CT-SOP|chapter|decision\s+rule|measurement\s+of\s+uncertainty"
-    r"|plating\s+of", re.I)
+    r"|plating\s+of"
+    # narrative/comment sentences that merely MENTION an analyte (and often carry
+    # sample-ID numbers, or list several analytes so a word like "Gram Negative"
+    # false-triggers an ND) must never be mistaken for a result row:
+    r"|averaged\s+from|submitted\s+to|at\s+the\s+request|from\s+samples?\b"
+    r"|results?\s+are\s+based\s+on|bile\s+tolerant", re.I)
 
 # ----------------------------------------------------------------------------
 # Analyte specifications
@@ -619,22 +624,45 @@ def _to_float(raw: str) -> Optional[float]:
         return None
 
 
+# A run of letters that legitimately follows a number is a UNIT glued to its value
+# (e.g. "100CFU/g", "5mg"); anything else following digits means the number is part
+# of an alphanumeric identifier (a sample/lot ID like "2104104F2-AS" or lab report
+# "C051121-05"), which must NEVER be read as a measurement.
+_UNIT_AFTER = re.compile(r"(?:cfu|mg|ug|mcg|ng|pg|kg|ml|mol|ppm|ppb|g|w)$", re.I)
+
+
 def _quantities(s: str):
     out, seen = [], []
     for m in QTY.finditer(s):
         st = m.start(2)
+        en = m.end(2)
         if any(a <= st < b for a, b in seen):
             continue
+        # Reject digits that are part of an alphanumeric identifier. This is the
+        # single guard that stops a COA's sample ID ("2104104F2-AS") from being
+        # mis-read as, say, a 2,104,104 CFU/g yeast & mold result.
+        if st > 0 and s[st - 1].isalpha():
+            continue
+        if en < len(s) and s[en].isalpha():
+            lead = re.match(r"[A-Za-z]+", s[en:])
+            if not (lead and _UNIT_AFTER.match(lead.group())):
+                continue
         v = _to_float(m.group(2))
         if v is None:
             continue
-        seen.append((st, m.end(2)))
+        seen.append((st, en))
         out.append({"raw": (m.group(1) or "").strip() + m.group(2).strip(),
                     "value": v, "qual": (m.group(1) or "").strip(), "start": st})
     return out
 
 
 def _is_limit_token(q, line, known_limit, multi) -> bool:
+    # A comparator-qualified quantity ("<20", "≤20", ">20") is a RESULT — a below/above-detection
+    # bound — never the action limit (limits are printed as bare numbers). Without this guard a
+    # below-detection result whose bound equals the limit (e.g. "<20" against a 20 µg/kg limit) was
+    # dropped AS the limit, and the bare limit "20" was kept as a false at-limit measurement.
+    if q.get("qual") in ("<", "≤", ">", "≥"):
+        return False
     pre = line[max(0, q["start"] - 24): q["start"]]
     if LIMIT_MARKER.search(pre):
         return True
@@ -683,7 +711,14 @@ def extract_result(after_label: str, known_limit):
         if qs:
             r = qs[-1]
             lim = qs[-2]["value"] if len(qs) >= 2 else known_limit
-            return {"raw": r["raw"], "value": r["value"], "nd": False, "limit": lim}
+            # Same two-column "Results | Limits" guard as the generic path: a bare result equal to
+            # its own limit IS the limit column (the result column was a PASS word or blank) -> record
+            # a conservative below-limit bound, never a false at-limit value. Can't hide a real
+            # exceedance (a failure is value > limit, a larger number).
+            if (r.get("qual") in (None, "")) and lim and abs(r["value"] - lim) < 1e-9:
+                return {"raw": f"<{r['raw']}", "value": r["value"], "nd": False, "limit": lim, "below_detect": True}
+            return {"raw": r["raw"], "value": r["value"], "nd": False, "limit": lim,
+                    "below_detect": r.get("qual") in ("<", "≤")}
     # generic layout (no trailing status): first quantity that is not the limit
     qs = _quantities(after_label)
     multi = len(qs) >= 2
@@ -697,7 +732,15 @@ def extract_result(after_label: str, known_limit):
     if not kept:
         return {"raw": "", "value": None, "nd": False, "limit": lim}
     r = kept[0]
-    return {"raw": r["raw"], "value": r["value"], "nd": False, "limit": lim}
+    # Two-column "Results | Limits" artifact: when the only kept result is a BARE number equal to its
+    # own action limit, that number IS the limit column, not a measured result (the result column was a
+    # PASS/FAIL word or blank). Record a conservative below-limit bound instead of a false at-limit
+    # value. This can NEVER hide a real exceedance — a failure is value > limit, a different (larger)
+    # number — and a genuine exactly-at-limit result is a pass either way.
+    if (r.get("qual") in (None, "")) and lim and abs(r["value"] - lim) < 1e-9:
+        return {"raw": f"<{r['raw']}", "value": r["value"], "nd": False, "limit": lim, "below_detect": True}
+    return {"raw": r["raw"], "value": r["value"], "nd": False, "limit": lim,
+            "below_detect": r.get("qual") in ("<", "≤")}
 
 
 def find_overall_result(text: str) -> str:
@@ -806,62 +849,123 @@ _RESULT_TOKEN = re.compile(
 
 
 def parse_columnar_micro(text: str, p: Product):
-    """Recover Yeast&Mold and Aerobic counts from NELabs-style columnar COAs.
+    """Recover Yeast&Mold / Aerobic counts from NELabs columnar COAs, where text
+    extraction splits the table into a LABEL block and a VALUE block.
 
-    Text extraction flattens the table into a block of analyte LABELS followed by
-    a block of RESULT values (one per label, same order). The tricky part: stray
-    numbers can sit between the two blocks, so we don't grab the first value seen
-    -- we pick the contiguous result run whose length matches the label count, and
-    pair by position. Only fills tymc/aerobic the generic parser missed; never
-    overwrites an existing numeric, and skips non-numeric results (n/a, ND)."""
+    Handles BOTH layouts seen in the wild:
+      * older: the value block FOLLOWS the labels;
+      * newer: a 'Results' value block PRECEDES the labels.
+    It ignores the parallel 'Limits' column (so a result is never read as its own
+    legal limit), pairs values to labels by position, and -- because the generic
+    label->inline-value parse cannot read these columnar tables and tends to grab a
+    limit value or a sample-ID number -- it is AUTHORITATIVE for tymc/aerobic on
+    NELabs COAs, overwriting any generic guess."""
     if not _NELABS_FORMAT.search(text):
         return
     lines = [l.strip() for l in text.splitlines()]
-    hdr = next((i for i, l in enumerate(lines) if re.fullmatch(r"microbiolog\w*", l, re.I)), None)
-    scan = lines[hdr + 1:] if hdr is not None else lines
 
-    # 1. label run (in document order), within a window after the Microbiology header
-    labelseq, last = [], None
-    for i, l in enumerate(scan[:80]):
+    # 1. label sequence in document order (first occurrence of each micro label)
+    labelseq, idxs = [], []
+    for i, l in enumerate(lines):
+        if len(l) >= 60:                       # skip long narrative/comment lines
+            continue
         for key, rx in _MICRO_LABELS:
-            if rx.search(l) and len(l) < 60 and key not in labelseq:
+            if key not in labelseq and rx.search(l):
                 labelseq.append(key)
-                last = i
+                idxs.append(i)
                 break
-    if len(labelseq) < 2 or last is None:
+    if len(labelseq) < 2:
         return
+    first, last, n = idxs[0], idxs[-1], len(labelseq)
 
-    # 2. all contiguous runs of result tokens after the label block
+    # 2. all contiguous runs of result tokens (anywhere), with their line span
     runs, cur = [], []
-    for l in scan[last + 1:]:
+    for i, l in enumerate(lines):
         if _RESULT_TOKEN.match(l):
-            cur.append(l)
+            cur.append((i, l))
         elif cur:
-            runs.append(cur)
-            cur = []
+            runs.append(cur); cur = []
     if cur:
         runs.append(cur)
 
-    # 3. choose the run that matches the number of labels (real value block), not a
-    #    stray 1-2 token run. Require ~one value per label; bail if none qualifies.
-    cand = [r for r in runs if len(r) >= len(labelseq) - 1]
-    if not cand:
-        return
-    values = max(cand, key=len)
+    def header_kind(run):
+        """'limits' / 'results' / '' from the nearest header line just above a run."""
+        for j in range(run[0][0] - 1, max(-1, run[0][0] - 4), -1):
+            if j < 0:
+                break
+            if re.search(r"\bresults?\b", lines[j], re.I):
+                return "results"
+            if re.search(r"\blimits?\b", lines[j], re.I):
+                return "limits"
+        return ""
 
-    # 4. positional pairing; fill only the numeric microbials we still lack
+    # 3. choose the value block: long enough to cover the labels, NOT the Limits
+    #    column, and ADJACENT to the label block (just before the first label or just
+    #    after the last) -- nearest wins.
+    cands = []
+    for run in runs:
+        toks = [l for _, l in run]
+        if len(toks) < 2 or header_kind(run) == "limits":
+            continue
+        lo, hi = run[0][0], run[-1][0]
+        if hi < first:
+            dist = first - hi
+        elif lo > last:
+            dist = lo - last
+        else:
+            continue
+        if dist <= 12:
+            cands.append((abs(len(toks) - n), dist, toks))
+    if not cands:
+        return
+    # prefer the run whose length best matches the label count (the micro value
+    # block), then the one nearest the labels -- this beats an adjacent cannabinoid
+    # / terpene value run that happens to sit between the value block and the labels.
+    cands.sort(key=lambda c: (c[0], c[1]))
+    values = cands[0][2]
+
+    # 4. positional pairing; NELabs columnar is authoritative for tymc/aerobic
     for key, tok in zip(labelseq, values):
         if key not in ("tymc", "aerobic"):
             continue
-        if p.analytes.get(key, {}).get("value") is not None:
-            continue
-        m = re.match(r"(<|>|≤|≥)?\s*([\d,]+(?:\.\d+)?)\s*$", tok)
-        if not m:                      # n/a, ND, etc. -> no numeric count to record
+        # A CFU count is an integer or a '<N' below-detect token. A token with a
+        # DECIMAL point is a %/cannabinoid value that leaked in from an adjacent
+        # block -- never a microbial count -- so it is rejected here.
+        m = re.match(r"(<|>|≤|≥)?\s*(\d[\d,]*)\s*$", tok)
+        if not m:                      # n/a, ND, decimals, etc. -> no count to record
             continue
         val = float(m.group(2).replace(",", ""))
         p.analytes[key] = {"raw": tok, "value": val, "status": "DETECTED",
                            "name": "Yeast & Mold" if key == "tymc" else "Total Aerobic Bacteria",
                            "unit": "CFU/g", "limit": CT_MICRO_LIMIT}
+
+
+# AltaSci / USP COAs report microbial DETECTION LIMITS as powers of ten (10^2..10^6,
+# e.g. "Total Yeast & Mold Count < 10^4 CFU/g Passed"). PDF text extraction drops the
+# superscript so "< 10^6" flattens to "< 106" -- which the generic parser would read
+# as a literal count of 106 (then 104 <= 200 would even masquerade as an "unusually
+# low" remediation signal). Restore the true magnitude and mark it below-detection.
+_USP_POW = re.compile(r"^\s*[<≤]\s*10\s*([2-6])\s*$")
+
+
+def _is_below_detect(e) -> bool:
+    """True for a '< X' (or flagged) result -- an UPPER BOUND under which the lab
+    passed. Such a value can never establish that a limit was exceeded."""
+    return bool(e.get("_below_detect")) or str(e.get("raw", "")).strip().startswith(("<", "≤"))
+
+
+def fix_usp_micro_powers(text: str, p: Product):
+    low = text.lower()
+    if "altasci" not in low and "usp" not in low:
+        return
+    for key in ("tymc", "aerobic"):
+        e = p.analytes.get(key)
+        if not e:
+            continue
+        m = _USP_POW.match(str(e.get("raw", "")))
+        if m:
+            e["value"] = float(10 ** int(m.group(1)))   # 104 -> 10^4, 106 -> 10^6
+            e["_below_detect"] = True
 
 
 def parse_analytes(text: str, p: Product):
@@ -891,12 +995,25 @@ def parse_analytes(text: str, p: Product):
                 entry.update(raw=res["raw"], value=0.0, status="ND")
             elif res["value"] is not None:
                 entry.update(raw=res["raw"], value=res["value"])
+                if res.get("below_detect"):      # a "< X" upper bound, NOT a measurement
+                    entry["_below_detect"] = True
             else:
                 continue
         p.analytes[spec["key"]] = entry
 
     parse_mycotoxins(text, p)
     parse_columnar_micro(text, p)   # recover NELabs columnar yeast&mold / aerobic
+    fix_usp_micro_powers(text, p)    # restore AltaSci/USP "< 10^X" detection limits
+
+    # Plausibility guard: a CFU/g microbial count physically cannot approach 1e11 (a gram of pure
+    # microbes). A larger value is an OCR / scientific-notation artifact (e.g. a garbled "4e14"),
+    # which would otherwise fire a FALSE "over limit" finding — drop it so the COA is treated as
+    # having no readable microbial value (a review note) rather than a fabricated result.
+    for _mk in ("tymc", "aerobic"):
+        _me = p.analytes.get(_mk)
+        if _me and isinstance(_me.get("value"), (int, float)) and _me["value"] >= 1e11 \
+                and (_me.get("raw") or "")[:1] not in "<≤":
+            del p.analytes[_mk]
 
     tymc = p.analytes.get("tymc")
     if tymc:
@@ -1072,7 +1189,7 @@ def apply_flags(p: Product, text: str, watch: int):
     #    CT Standard (the 10,000 CFU/g watch line) but legal -> YELLOW. Coliform /
     #    bile-tolerant gram-negative flag only if a limit is present and exceeded.
     aer = a.get("aerobic")
-    if aer and aer.get("value") is not None:
+    if aer and aer.get("value") is not None and not _is_below_detect(aer):
         av = aer["value"]
         alim = aer.get("limit") or CT_MICRO_LIMIT
         if av > alim:
@@ -1099,7 +1216,7 @@ def apply_flags(p: Product, text: str, watch: int):
 
     # 5. Yeast & mold -- its OWN scale: > legal 100k = RED; watch..100k = YELLOW.
     tymc = a.get("tymc")
-    if tymc and tymc.get("value") is not None:
+    if tymc and tymc.get("value") is not None and not _is_below_detect(tymc):
         ym = tymc["value"]
         if ym > CT_MICRO_LIMIT:
             p.flags.append(f"OVER_CT_LIMIT: yeast & mold {_amount(tymc)} "
@@ -1112,7 +1229,7 @@ def apply_flags(p: Product, text: str, watch: int):
     # 6. Remediation signature: low/ND yeast&mold yet a mycotoxin detectable
     myco_hit = any(a.get(k) and a[k].get("value") and a[k]["value"] > 0
                    for k in ["aflatoxin", "ochratoxin"] + MYCO_COMP_KEYS)
-    if (is_flower(p) and tymc and tymc.get("value") is not None
+    if (is_flower(p) and tymc and tymc.get("value") is not None and not _is_below_detect(tymc)
             and tymc["value"] <= watch and myco_hit):
         p.flags.append("REMEDIATION_VERIFY: low/ND yeast&mold but a mycotoxin is detectable (verify)")
 

@@ -297,7 +297,9 @@ CANN_SPECS = [
     ("d9_thc",             "Delta-9 THC",
         r"(?:delta[\s\-]*9|Δ9|Δ\s*\-?\s*9|δ\s*\-?\s*9|\bd[\s\-]?9\b)"
         r"[\s\-]*thc\b"),
-    ("thc",                "THC",                       r"(?<![a-z])thc(?![a-z])"),
+    # Δ9/plain THC, but NOT the acid form: "THC-A"/"THC A"/"THCA" must not match here, or the THCA
+    # value gets duplicated into the THC field and inflates derived Total THC past 100%.
+    ("thc",                "THC",                       r"(?<![a-z])thc(?![\s\-]*a\b)(?![a-z])"),
 ]
 
 _PCT_RE = re.compile(r"([\d]{1,3}(?:\.\d+)?)\s*%")
@@ -334,6 +336,25 @@ def _read_pct(segment: str) -> Optional[float]:
 _CANN_FORMULA = re.compile(r"0\.877|\*\s*thca|\+\s*thc|=\s*\(", re.I)
 
 
+def _lodloq_result(segment: str) -> Optional[float]:
+    """For a columnar 'Analyte LOD LOQ Result(%) Result(mg/g)' row, return the RESULT
+    percentage -- the value AFTER the two leading detection-limit columns -- so the
+    tiny LOD/LOQ figures (~0.0001) are never mistaken for the potency. 'ND' / a
+    non-numeric in the result position returns None (handled as not-detected)."""
+    toks = segment.split()
+    nums = 0
+    for i, tk in enumerate(toks):
+        if re.fullmatch(r"\d+(?:\.\d+)?", tk.replace(",", "")):
+            nums += 1
+            if nums == 2:                       # LOD, LOQ consumed -> next token is Result
+                rest = toks[i + 1:]
+                if rest and re.fullmatch(r"\d+(?:\.\d+)?", rest[0].replace(",", "")):
+                    v = float(rest[0].replace(",", ""))
+                    return v if 0.0 <= v <= 100.0 else None
+                return None                     # 'ND' or absent -> not detected
+    return None
+
+
 def _bare_pct(segment: str) -> Optional[float]:
     """First plausible 0-100 percentage from a bare-number '% w/w' cannabinoid row
     (e.g. 'THCA 37.06 2244.0' -> 37.06). The \\d{1,3} cap skips 4+ digit dosing
@@ -362,6 +383,13 @@ def parse_cannabinoids(text: str, p) -> None:
                       text, re.I) or re.search(r"\bcannabinoids?\b", text, re.I))
     body = text[mreg.start(): mreg.start() + 2200] if mreg else text
     ww = bool(re.search(r"%\s*w/?\s*w|\(\s*%|w/?w\b", body, re.I)) or mreg is not None
+    # Newer labs (e.g. Analytics Labs) print a columnar table:
+    #   Analyte | LOD | LOQ | Result(%) | Result(mg/g)
+    # so a row is "THCa 0.00003 0.00010 29.656 296.560". The RESULT is the 3rd number;
+    # naively taking the first bare number would read the LOD (~0.0001) as the potency.
+    # When LOD AND LOQ column headers are present, read the value AFTER the two
+    # detection-limit columns instead.
+    has_lod_loq = bool(re.search(r"\bLOD\b", body, re.I) and re.search(r"\bLOQ\b", body, re.I))
     low = body.lower()
     for key, nice, label in CANN_SPECS:
         if key in p.cannabinoids:
@@ -371,7 +399,9 @@ def parse_cannabinoids(text: str, p) -> None:
             if v4.FOOTNOTE_RE.search(line) or _CANN_FORMULA.search(line):
                 continue
             after = line[m.end() - m.start():]
-            pct = _read_pct(after)
+            pct = _lodloq_result(after) if has_lod_loq else None
+            if pct is None:
+                pct = _read_pct(after)
             if pct is None and ww:
                 pct = _bare_pct(after)
             if pct is None:
@@ -389,11 +419,19 @@ def parse_cannabinoids(text: str, p) -> None:
             d9 = p.cannabinoids.get("thc", {}).get("value")
         if thca is not None or d9 is not None:
             tot = 0.877 * (thca or 0.0) + (d9 or 0.0)
-            if tot > 0:
+            if 0 < tot <= 100:
                 p.cannabinoids["total_thc"] = {"value": round(tot, 2),
                                                "raw": f"{tot:.2f}% (derived)",
                                                "name": "Total THC (derived)",
                                                "unit": "%"}
+            elif tot > 100:
+                # A derived Total THC over 100% is physically impossible (% w/w) -> a component was
+                # misread, almost always an OCR-garbled decimal on an old scan (".049"->49, "1.86"->86,
+                # "o.78"->78). The potency for this COA is internally inconsistent, so drop the THC
+                # fields rather than publish a wrong number — this COA's THC potency is treated as not
+                # reliably readable instead of fabricated.
+                for _f in ("thca", "thc", "d9_thc", "total_thc"):
+                    p.cannabinoids.pop(_f, None)
 
 
 # Cannabinoid fields that trigger the 35% flower review (highest wins).
