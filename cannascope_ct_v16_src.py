@@ -78,11 +78,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V16.3.3"
+APP_NAME = "CannaScope CT V16.3.4"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "16.3.3"
+SOFTWARE_VERSION = "16.3.4"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -326,7 +326,7 @@ SELF_IMPROVE_LOG = os.path.join(OUT_DIR, "Self-Improvement Log.json")
 # stamped AND every UNSTAMPED legacy-ledger record then becomes stale and is re-evaluated by the
 # `audit-cache` subcommand. (The existing legacy ledger is entirely unstamped, so all of it is a
 # re-eval candidate — which is exactly the pre-V16 concern: records skipped before newer logic.)
-ANALYSIS_VERSION = "16.3.3"   # BUMP on any detection-logic change (product-type guardrail, potency
+ANALYSIS_VERSION = "16.3.4"   # BUMP on any detection-logic change (product-type guardrail, potency
                               # math, microbial bound handling, limit selection, self-audit categories,
                               # multi-product per-product isolation). The clean-ledger is stamped with
                               # this; entries from an OLDER analysis version are NOT trusted as clean and
@@ -1482,6 +1482,206 @@ import atexit as _atexit
 _atexit.register(lambda: _ocr_cache_flush(force=True))
 
 
+# ============================================================================
+# Multi-product COA cache — "parse once per PDF, store every product block".
+# A COA document may hold several products (2015-era Northeast Labs layout). We
+# parse the whole document ONCE, extract each product's structured block
+# (identifiers + measurements + the block's own text), and cache the list keyed
+# by the PDF's content hash. Every registry record that shares this PDF then
+# matches itself to ONE block and reuses that block's measurements — no re-OCR,
+# no re-parse, and the per-product separation is preserved across runs.
+# Modeled on the OCR-text cache (content-hash keyed JSON). Bump the version to
+# invalidate every entry after a block-extraction logic change.
+# ============================================================================
+MULTIPRODUCT_PDF_CACHE = os.path.join(OUT_DIR, "Multi-Product COA Cache.json")
+MULTIPRODUCT_CACHE_VERSION = 1
+_MP_CACHE = None
+_MP_CACHE_LOCK = threading.Lock()
+_MP_CACHE_DIRTY = 0
+_MP_CACHE_FLUSH_EVERY = 25
+
+
+def _mp_cache_load():
+    global _MP_CACHE
+    if _MP_CACHE is None:
+        try:
+            with open(MULTIPRODUCT_PDF_CACHE, encoding="utf-8") as f:
+                _MP_CACHE = json.load(f)
+        except (OSError, ValueError):
+            _MP_CACHE = {}
+    return _MP_CACHE
+
+
+def _mp_cache_flush(force=False):
+    global _MP_CACHE_DIRTY
+    if _MP_CACHE is None:
+        return
+    with _MP_CACHE_LOCK:
+        if not force and _MP_CACHE_DIRTY == 0:
+            return
+        try:
+            tmp = MULTIPRODUCT_PDF_CACHE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(_MP_CACHE, f, default=str)
+            os.replace(tmp, MULTIPRODUCT_PDF_CACHE)
+            _MP_CACHE_DIRTY = 0
+        except OSError:
+            pass
+
+
+_atexit.register(lambda: _mp_cache_flush(force=True))
+
+
+def _pdf_sha1(path):
+    """SHA-1 of a PDF file's bytes (content hash), or '' if unreadable."""
+    import hashlib
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _block_text_sha1(text):
+    import hashlib
+    return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()
+
+
+def _mp_cache_key(path, report_url=""):
+    """Content-hash key for a PDF's block set (falls back to the report URL)."""
+    sha = _pdf_sha1(path) if path else ""
+    if sha:
+        return f"{MULTIPRODUCT_CACHE_VERSION}:{sha}"
+    if report_url:
+        return f"{MULTIPRODUCT_CACHE_VERSION}:url:{report_url}"
+    return ""
+
+
+def _extract_block_record(block, watch):
+    """Parse ONE product block's text into a structured per-product record: its identifiers
+    PLUS its own measurements (the heavy parse runs once here, then is cached and reused)."""
+    bt = block.get("text", "") or ""
+    bp = v5.ProductV5()
+    bp.overall_result = v4.find_overall_result(bt)
+    bp.test_lab = v4.parse_lab(bt)
+    v4.parse_analytes(bt, bp)
+    v5.parse_cannabinoids(bt, bp)
+    return {
+        "block_id": block.get("block_id", "") or "",
+        "lab_id": block.get("lab_id", "") or "",
+        "lab_report_no": block.get("lab_report_no", "") or "",
+        "sample_id": block.get("sample_id", "") or "",
+        "batch": block.get("batch", "") or "",
+        "test_date": block.get("test_date", "") or "",
+        "product_description": block.get("product_description", "") or "",
+        "registration_numbers": list(block.get("registration_numbers", []) or []),
+        "panels": list(block.get("panels", []) or []),
+        "page_indices": list(block.get("page_indices", []) or []),
+        "overall_result": bp.overall_result or "",
+        "test_lab": bp.test_lab or "",
+        "pesticides": getattr(bp, "pesticides", "") or "",
+        "solvents": getattr(bp, "solvents", "") or "",
+        "solvent_hits": list(getattr(bp, "solvent_hits", []) or []),
+        "analytes": dict(getattr(bp, "analytes", {}) or {}),
+        "cannabinoids": dict(getattr(bp, "cannabinoids", {}) or {}),
+        "mold_yeast_cfu": getattr(bp, "mold_yeast_cfu", None),
+        "testing_date": parse_testing_date(bt),
+        "text": bt,
+        "text_sha1": _block_text_sha1(bt),
+    }
+
+
+def _blocks_for_pdf(path, full_text, report_url, watch):
+    """Get-or-build the structured per-product block records for a PDF. Returns
+    (records, cache_key). Parses the document only on a cache miss."""
+    key = _mp_cache_key(path, report_url)
+    if key:
+        cached = _mp_cache_load().get(key)
+        if cached is not None and int(cached.get("_schema") or 0) == MULTIPRODUCT_CACHE_VERSION:
+            return (cached.get("blocks", []) or [], key)
+    recs = [_extract_block_record(b, watch) for b in mp.extract_blocks(text=full_text)]
+    if key:
+        global _MP_CACHE_DIRTY
+        with _MP_CACHE_LOCK:
+            _mp_cache_load()[key] = {
+                "_schema": MULTIPRODUCT_CACHE_VERSION,
+                "source_url": report_url or "",
+                "pdf_sha1": key.split(":", 1)[-1],
+                "cached_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "n_products": len(recs),
+                "blocks": recs,
+            }
+            _MP_CACHE_DIRTY += 1
+            due = _MP_CACHE_DIRTY >= _MP_CACHE_FLUSH_EVERY
+        if due:
+            _mp_cache_flush()
+    return (recs, key)
+
+
+def _apply_block_record(p, rec, watch):
+    """Apply ONE cached product block's measurements + identifiers to product `p` (reuse the
+    parse-once result), recompute flags from those measurements, and bind `p` to the block
+    (so the source audit can verify each flagged value came from THIS block, not the shared PDF)."""
+    bt = rec.get("text", "") or ""
+    if not hasattr(p, "_watch"):
+        p._watch = watch
+    p.analytes = dict(rec.get("analytes") or {})
+    p.cannabinoids = dict(rec.get("cannabinoids") or {})
+    p.solvent_hits = list(rec.get("solvent_hits") or [])
+    p.overall_result = rec.get("overall_result", "") or ""
+    p.test_lab = rec.get("test_lab", "") or ""
+    p.pesticides = rec.get("pesticides", "") or ""
+    p.solvents = rec.get("solvents", "") or ""
+    myc = rec.get("mold_yeast_cfu")
+    p.mold_yeast_cfu = myc if isinstance(myc, (int, float)) else None
+    p.testing_date = rec.get("testing_date", "") or parse_testing_date(bt)
+    p.flags = []
+    p.thc_flags = []
+    v4.apply_flags(p, bt, watch)
+    v5.apply_thc_flags(p)
+    p.strain = v5.product_core_name(p)
+    p._coa_status = validate_coa_row(p, bt)
+    p._ids = extract_coa_identifiers(bt)
+    p._internal = scan_internal_conflict(bt, "")
+    p._cat_present = _detect_presence(bt)
+    try:
+        p._format_profile = profile_coa(p, bt)
+        p._extraction = assess_extraction(p, bt, p._format_profile)
+    except Exception as e:
+        p._format_profile = None
+        p._extraction = dict(level="UNCERTAIN", score=0, checks={}, conflict=False, mismatch=False,
+                             hold=False, reasons=[f"format-learning error: {e}"])
+    p._coa_block_id = rec.get("block_id", "") or ""
+    p._coa_block_text = bt
+    p._coa_block_text_sha1 = rec.get("text_sha1", "") or _block_text_sha1(bt)
+    p._coa_block_ident = {k: rec.get(k) for k in
+                          ("lab_id", "sample_id", "batch", "test_date", "product_description", "registration_numbers")}
+    p._coa_present = True
+
+
+def _block_text_for(pdf_key, block_id, full_text=""):
+    """The text of one product block — from the multi-product cache if present, else rebuilt from
+    the full COA text. Used by the source audit to bind a (possibly cache-rehydrated) multi-product
+    record back to its matched block."""
+    if pdf_key:
+        cached = _mp_cache_load().get(pdf_key)
+        if cached:
+            for b in cached.get("blocks", []) or []:
+                if (b.get("block_id") or "") == block_id:
+                    return b.get("text", "") or ""
+    if full_text and mp is not None:
+        try:
+            for b in mp.extract_blocks(text=full_text):
+                if (b.get("block_id") or "") == block_id:
+                    return b.get("text", "") or ""
+        except Exception:
+            pass
+    return ""
+
+
 def _isolated_ocr_pdf(src, max_pages: int = 6) -> str:
     """OCR one COA in a separate process group. A segfault, hang, or timeout takes
     down only that child (and any grandchildren) -> '' (the COA is treated as
@@ -1646,10 +1846,16 @@ def cached_or_v15(p, session, watch, cache, allow_network=True):
         return p
     p = process_product(p, session, watch)
     if bool(getattr(p, "analytes", None)) or bool(getattr(p, "cannabinoids", None)):
-        # Only cache a COA we actually read. Keep the report-fidelity extras that aren't measurements.
+        # Only cache a COA we actually read. Keep the report-fidelity extras that aren't measurements,
+        # plus the multi-product block binding so a rehydrated record's source audit re-verifies against
+        # its OWN matched block (not the whole shared PDF).
         cache.put(p, method="v15", text_len=0, pdf_path=v4.cache_path(p),
                   extra={"testing_date": getattr(p, "testing_date", "") or test_date(p),
-                         "_coa_status": getattr(p, "_coa_status", "") or ""})
+                         "_coa_status": getattr(p, "_coa_status", "") or "",
+                         "_coa_block_id": getattr(p, "_coa_block_id", "") or "",
+                         "_mp_pdf_key": getattr(p, "_mp_pdf_key", "") or "",
+                         "_multi_product_coa": bool(getattr(p, "_multi_product_coa", False)),
+                         "_multi_product_isolated": bool(getattr(p, "_multi_product_isolated", False))})
     return p
 
 
@@ -1679,6 +1885,8 @@ def _process_product(p, session, watch):
     p._multi_product_info = None
     p._multi_product_isolated = False
     p._multi_product_unresolved = False
+    p._coa_block_id = ""
+    p._coa_block_text = ""
     if mp is not None:
         try:
             _mpd = mp.analyze_document(text=full_text)
@@ -1696,26 +1904,35 @@ def _process_product(p, session, watch):
                 # between. A weak signal (e.g. 2 registration numbers on an otherwise single-product COA)
                 # leaves n_products < 2 — parse the whole document normally, never suppress.
                 if MULTIPRODUCT_SPLIT_ENABLED and (_mpd.get("n_products") or 0) >= 2:
-                    _blk, _conf, _reason = mp.isolate_product(
-                        text=full_text,
-                        target_name=getattr(p, "product_name", "") or "",
-                        target_lab_id=getattr(p, "_lab_id_hint", "") or "",
-                        target_batch=(getattr(p, "batch", "") or getattr(p, "lot", "") or ""))
-                    if _blk and _conf >= MULTIPRODUCT_MIN_CONF:
-                        text = _blk                       # parse ONLY this product's block
+                    # PARSE ONCE: get/build the structured per-product blocks for this PDF (cached by
+                    # content hash + reused by every record that shares this document URL).
+                    _recs, _pdfkey = _blocks_for_pdf(path, full_text, getattr(p, "report_url", ""), watch)
+                    p._mp_pdf_key = _pdfkey
+                    # Match THIS registry record to exactly one block by strongest identifier.
+                    _blk, _conf, _reason, _strat = mp.match_block(
+                        _recs,
+                        registration_number=getattr(p, "registration_number", "") or "",
+                        product_name=getattr(p, "product_name", "") or "",
+                        lab_id=getattr(p, "_lab_id_hint", "") or "",
+                        sample_id=getattr(p, "_sample_id_hint", "") or "",
+                        batch=(getattr(p, "batch", "") or getattr(p, "lot", "") or ""))
+                    if _blk is not None and _conf >= MULTIPRODUCT_MIN_CONF:
+                        # Reuse the cached per-product extraction — measurements come from THIS block only.
+                        _apply_block_record(p, _blk, watch)
                         p._multi_product_isolated = True
-                        p._multi_product_isolation = {"confidence": _conf, "reason": _reason}
-                    else:
-                        # Cannot uniquely identify this product in the shared document. Publishing ANY
-                        # extraction risks cross-attribution -> suppress + route to manual review.
-                        p._multi_product_unresolved = True
-                        p.parse_note = (f"multi-product COA ({_mpd.get('n_products')} products): could not "
-                                        f"uniquely isolate this product ({_reason}); routed to manual "
-                                        "review (not extracted)")[:200]
-                        p._coa_status = MATCH_MANUAL
-                        p._cat_present = {}
-                        p._coa_present = True
+                        p._multi_product_isolation = {"confidence": _conf, "reason": _reason,
+                                                      "strategy": _strat, "block_id": _blk.get("block_id", "")}
                         return p
+                    # Cannot uniquely identify this product in the shared document. Publishing ANY
+                    # extraction risks cross-attribution -> suppress + route to manual review.
+                    p._multi_product_unresolved = True
+                    p.parse_note = (f"multi-product COA ({_mpd.get('n_products')} products): could not "
+                                    f"uniquely isolate this product ({_reason}); routed to manual "
+                                    "review (not extracted)")[:200]
+                    p._coa_status = MATCH_MANUAL
+                    p._cat_present = {}
+                    p._coa_present = True
+                    return p
         except Exception:
             # Detection must never break a scan; fall back to the MMBR-only signal (no substitution).
             _regs = {m.group(0).upper().replace(" ", "") for m in re.finditer(r"MMBR\.?\s?\d{4,}", full_text or "")}
@@ -5052,6 +5269,7 @@ def build_pdf(out_path, report_no, ctx):
         "published_rows_verified_against_linked_coa": "Published values independently re-confirmed in their own linked COA.",
         "exact_value_link_verification_failures": "Published values that FAILED re-confirmation in their COA (target: 0).",
         "coa_source_mismatch_count": "Values excluded because they didn't match their linked COA.",
+        "multi_product_rows_verified_against_matched_block": "Published rows from a multi-product COA whose flagged values were re-verified against THEIR matched product block (not merely somewhere in the shared PDF) — proof no value was cross-attributed from another product in the same document.",
         "rows_fully_verified": "Published rows that passed every field check (value, product, date, lab, unit, analyte).",
         "coas_fingerprinted_this_run": "COAs freshly read + format-fingerprinted THIS run (cached COAs aren't re-fingerprinted).",
         "years_in_report_window": "Distinct test/approval years represented across the reviewed COAs.",
@@ -5550,21 +5768,38 @@ def audit_published_coa_sources(pub_raw, watch):
     verified, mismatches, provenance = [], [], []
     n_verified = n_fail = 0
     n_full = n_partial = 0
+    n_mp_block_rows = n_mp_block_values = 0       # multi-product rows verified against their matched block
     field_confirmed = dict(value=0, product=0, date=0, lab=0, unit=0, analyte=0)
     for p in pub_raw:
         text = ""
+        full_text = ""
         try:
             cp = v4.cache_path(p)
             if os.path.exists(cp):
-                text = v4.read_pdf_text(cp) or ""
+                full_text = v4.read_pdf_text(cp) or ""
         except Exception:
-            text = ""
+            full_text = ""
+        # MULTI-PRODUCT BINDING: a record isolated from a shared multi-product COA must be verified
+        # against its OWN matched product block, NOT merely "somewhere in the shared PDF" — otherwise
+        # product B could "verify" against product A's value. Prefer the block text held on the product
+        # (fresh isolate); else re-bind via the cached block id (cache-rehydrated record).
+        _btext = getattr(p, "_coa_block_text", "") or ""
+        if not _btext:
+            _bid = getattr(p, "_coa_block_id", "") or ""
+            if _bid:
+                _btext = _block_text_for(getattr(p, "_mp_pdf_key", "") or "", _bid, full_text)
+        text = _btext or full_text
         prov = _coa_provenance(p, text)
         drivers = [d for d in v5.quantified_details(p, watch) if v5.is_flag_driver(d)]
         presents = [(d, _value_in_coa_text(d.get("value"), text)) for d in drivers]
         bad = [d for d, ok in presents if not ok]
         n_verified += sum(1 for _, ok in presents if ok)
         n_fail += len(bad)
+        if getattr(p, "_coa_block_id", "") and _btext and drivers:
+            # this published row came from an isolated multi-product block; its values were checked
+            # against THAT block's text (not the shared PDF at large)
+            n_mp_block_rows += 1
+            n_mp_block_values += sum(1 for _, ok in presents if ok)
         # Triple-check stamp (conservative): clear mismatch == a flag-driver value not found in the
         # linked COA -> excluded to manual review (unchanged). Everything else is published WITH the
         # stamp recording which context fields were confirmed in the document.
@@ -5606,6 +5841,8 @@ def audit_published_coa_sources(pub_raw, watch):
         rows_excluded_for_coa_source_mismatch=len(mismatches),
         rows_fully_verified=n_full,
         rows_partially_verified=n_partial,
+        multi_product_rows_verified_against_matched_block=n_mp_block_rows,
+        multi_product_values_verified_against_matched_block=n_mp_block_values,
         field_confirmed=field_confirmed,
         # registry COA == extracted-result COA by construction (we fetch & parse the
         # registry's own LAB-ANALYSIS link); recorded explicitly for transparency.
@@ -7596,8 +7833,11 @@ def main():
         print(f"  COA SOURCE AUDIT: excluded {len(source_mismatches)} product(s) whose flagged value "
               "could not be re-verified in their own linked COA -> COA Source Mismatch Review queue.")
     else:
+        _mpb = src_metrics.get("multi_product_rows_verified_against_matched_block", 0)
+        _bsuffix = (f" ({_mpb} from isolated multi-product blocks, verified against the MATCHED block)"
+                    if _mpb else "")
         print(f"  COA SOURCE AUDIT: all {src_metrics['published_rows_verified_against_linked_coa']} "
-              "published flagged values re-verified in their own linked COA.")
+              f"published flagged values re-verified in their own linked COA{_bsuffix}.")
 
     # --- COA FORMAT LEARNING: observe every COA scanned this run into the persistent per-year
     #     learner (so the parser stays historically aware across runs) + record the confidence mix.

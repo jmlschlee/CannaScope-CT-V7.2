@@ -70,6 +70,35 @@ def lab_report_no(text: str) -> str:
     return f"N{m.group(1)}" if m else ""
 
 
+# Per-block secondary identifiers. These DISTINGUISH product blocks inside one document and, when a
+# registry record happens to carry the same value, MATCH a record to its block. Conservative patterns:
+# we would rather extract "" than a wrong value (a wrong identifier could mis-match -> cross-attribution).
+_SAMPLE_ID = re.compile(r"\bSample\s*(?:ID|I\.D\.|Number|No\.?|#)\s*:?\s*([A-Za-z0-9][A-Za-z0-9\-/]{2,})", re.I)
+_BATCH = re.compile(r"\b(?:Batch|Lot)\s*(?:ID|Number|No\.?|#)?\s*:?\s*([A-Za-z0-9][A-Za-z0-9\-/]{2,})", re.I)
+_TEST_DATE = re.compile(r"\bDate\s*Tested\s*:?\s*([0-9]{1,2}[/\-][0-9]{1,2}[/\-][0-9]{2,4}|\d{4}-\d{2}-\d{2})", re.I)
+
+
+def sample_id(text: str) -> str:
+    m = _SAMPLE_ID.search(text or "")
+    return m.group(1).strip() if m else ""
+
+
+def batch_id(text: str) -> str:
+    m = _BATCH.search(text or "")
+    return m.group(1).strip() if m else ""
+
+
+def test_date(text: str) -> str:
+    m = _TEST_DATE.search(text or "")
+    return m.group(1).strip() if m else ""
+
+
+def registration_numbers(text: str) -> List[str]:
+    """Distinct CT registration numbers (MMBR.######) found in the block, normalized."""
+    return sorted({m.group(0).upper().replace(" ", "").replace("MMBR", "MMBR.").replace("..", ".")
+                   for m in _MMBR.finditer(text or "")})
+
+
 # Lines that appear in the identity block but are NOT the product description —
 # the OCR interleaves these field VALUES (sample site, collector, dates, IDs,
 # the company header) between the labels and the real product name.
@@ -162,6 +191,10 @@ def _page_identity(page_text: str) -> Dict:
         "lab_id": lab_id(page_text),
         "lab_report_no": lab_report_no(page_text),
         "product_description": product_description(page_text),
+        "sample_id": sample_id(page_text),
+        "batch": batch_id(page_text),
+        "test_date": test_date(page_text),
+        "registration_numbers": registration_numbers(page_text),
         "panel": _panel(page_text),
         "page_of": (lambda m: (int(m.group(1)), int(m.group(2))) if m else None)(_PAGE_OF.search(page_text or "")),
         "text": page_text,
@@ -204,6 +237,10 @@ def analyze_document(text=None, pages: Optional[List[str]] = None) -> Dict:
                 "lab_id": ident["lab_id"],
                 "lab_report_no": ident["lab_report_no"],
                 "product_description": ident["product_description"],
+                "sample_id": ident["sample_id"],
+                "batch": ident["batch"],
+                "test_date": ident["test_date"],
+                "registration_numbers": list(ident["registration_numbers"]),
                 "panels": [],
                 "page_indices": [],
                 "_texts": [],
@@ -213,18 +250,29 @@ def analyze_document(text=None, pages: Optional[List[str]] = None) -> Dict:
             g["product_description"] = ident["product_description"]
         if not g["lab_report_no"] and ident["lab_report_no"]:
             g["lab_report_no"] = ident["lab_report_no"]
+        for fld in ("sample_id", "batch", "test_date"):
+            if not g[fld] and ident[fld]:
+                g[fld] = ident[fld]
+        for rn in ident["registration_numbers"]:
+            if rn not in g["registration_numbers"]:
+                g["registration_numbers"].append(rn)
         if ident["panel"] != "?" and ident["panel"] not in g["panels"]:
             g["panels"].append(ident["panel"])
         g["page_indices"].append(idx)
         g["_texts"].append(ident["text"])
 
     products = []
-    for key in order:
+    for n, key in enumerate(order):
         g = groups[key]
         products.append({
+            "block_id": g["lab_id"] or g["sample_id"] or (g["product_description"].upper() if g["product_description"] else "") or f"block{n}",
             "lab_id": g["lab_id"],
             "lab_report_no": g["lab_report_no"],
             "product_description": g["product_description"],
+            "sample_id": g["sample_id"],
+            "batch": g["batch"],
+            "test_date": g["test_date"],
+            "registration_numbers": g["registration_numbers"],
             "panels": g["panels"],
             "page_indices": g["page_indices"],
             "text": "\n".join(g["_texts"]),
@@ -278,64 +326,122 @@ def _desc_specificity(desc: str) -> Optional[str]:
     return re.sub(r"\s+", "", m.group(1)) if m else None
 
 
-def isolate_product(text=None, pages: Optional[List[str]] = None,
-                    target_name: str = "", target_lab_id: str = "",
-                    target_batch: str = "") -> Tuple[Optional[str], float, str]:
-    """Return ``(block_text, confidence, reason)`` for the product matching the
-    registry record, or ``(None, 0.0, reason)`` when it cannot be isolated
-    confidently — in which case the caller MUST route to manual review rather
-    than extract (extracting the wrong block = cross-attribution).
+def _norm_reg(s: str) -> str:
+    """Normalize a registration number for comparison (strip spaces/punct, upper)."""
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
-    Matching precedence (most reliable first):
-      1. exact Laboratory ID # (if the registry record carries one),
-      2. exact/normalized Product Description,
-      3. distinguishing unit marker (the "#N" suffix) when the base names tie,
-      4. otherwise -> ambiguous, return None.
+
+def extract_blocks(text=None, pages: Optional[List[str]] = None) -> List[Dict]:
+    """The structured per-product blocks of a (possibly multi-product) COA document.
+    Each block carries its own identifiers + text (see ``analyze_document``)."""
+    return analyze_document(text=text, pages=pages)["products"]
+
+
+def match_block(blocks: List[Dict], *, registration_number: str = "", product_name: str = "",
+                lab_id: str = "", sample_id: str = "", batch: str = "",
+                test_date: str = "") -> Tuple[Optional[Dict], float, str, str]:
+    """Match a registry record to EXACTLY ONE product block, by strongest identifier first.
+    Returns ``(block, confidence, reason, strategy)`` or ``(None, 0.0, reason, "")`` when the
+    record cannot be uniquely tied to one block — the caller MUST then route to manual review
+    (never guess; a wrong block = cross-attribution).
+
+    A STRONG identifier that matches MORE THAN ONE block is treated as genuinely ambiguous and
+    fails immediately (we do not fall back to a weaker heuristic that might pick the wrong one).
     """
+    if not blocks:
+        return (None, 0.0, "no product blocks", "")
+
+    def _uniq(pred):
+        hits = [b for b in blocks if pred(b)]
+        return hits[0] if len(hits) == 1 else (None if not hits else False)  # False = ambiguous
+
+    # 1) Laboratory ID # (strongest — the lab's own per-sample key)
+    tid = _norm_reg(_lab_id_norm(lab_id)) if lab_id else ""
+    if tid:
+        h = _uniq(lambda b: _norm_reg(b.get("lab_id", "")) == tid)
+        if h: return (h, 1.0, f"matched Laboratory ID# {lab_id}", "lab_id")
+        if h is False: return (None, 0.0, f"Laboratory ID# {lab_id} matched multiple blocks", "")
+    # 2) CT registration number (MMBR) present in the block
+    treg = _norm_reg(registration_number)
+    if treg:
+        h = _uniq(lambda b: any(_norm_reg(r) == treg for r in b.get("registration_numbers", [])))
+        if h: return (h, 0.98, f"matched registration number {registration_number}", "registration_number")
+        if h is False: return (None, 0.0, f"registration number {registration_number} matched multiple blocks", "")
+    # 3) Sample ID
+    if sample_id:
+        h = _uniq(lambda b: b.get("sample_id", "") and _norm_reg(b["sample_id"]) == _norm_reg(sample_id))
+        if h: return (h, 0.97, f"matched sample ID {sample_id}", "sample_id")
+        if h is False: return (None, 0.0, f"sample ID {sample_id} matched multiple blocks", "")
+    # 4) Batch / lot
+    if batch:
+        h = _uniq(lambda b: b.get("batch", "") and _norm_reg(b["batch"]) == _norm_reg(batch))
+        if h: return (h, 0.95, f"matched batch {batch}", "batch")
+        if h is False: return (None, 0.0, f"batch {batch} matched multiple blocks", "")
+    # 5) Product description, exact (normalized) — disambiguate residual ties by test date
+    tnorm = _norm(product_name)
+    if tnorm:
+        exact = [b for b in blocks if _norm(b.get("product_description", "")) == tnorm]
+        if len(exact) == 1:
+            return (exact[0], 0.9, "matched product description (exact)", "description")
+        if len(exact) > 1 and test_date:
+            td = [b for b in exact if b.get("test_date") and _same_date(b["test_date"], test_date)]
+            if len(td) == 1:
+                return (td[0], 0.9, "matched product description + test date", "description+date")
+            return (None, 0.0, "product description matched multiple blocks (test date did not disambiguate)", "")
+        if len(exact) > 1:
+            return (None, 0.0, "product description matched multiple blocks", "")
+        # 6) Distinguishing unit marker (#N) when base names tie (e.g. "Scott's OG #4")
+        tgt_unit = _desc_specificity(product_name) or _desc_specificity(batch)
+        if tgt_unit:
+            unit_hit = [b for b in blocks if _desc_specificity(b.get("product_description", "")) == tgt_unit]
+            if len(unit_hit) == 1:
+                return (unit_hit[0], 0.85, f"matched unit marker #{tgt_unit}", "unit_marker")
+            if len(unit_hit) > 1:
+                return (None, 0.0, f"unit marker #{tgt_unit} matched multiple blocks", "")
+        # 7) Substring containment, only if unambiguous
+        contains = [b for b in blocks if tnorm in _norm(b.get("product_description", ""))]
+        if len(contains) == 1:
+            return (contains[0], 0.7, "matched product description (contains)", "description_contains")
+
+    return (None, 0.0,
+            f"ambiguous: {len(blocks)} products in document, record "
+            f"'{product_name or registration_number or lab_id or '?'}' did not uniquely match one block",
+            "")
+
+
+def _lab_id_norm(s: str) -> str:
+    return lab_id(s) or (s or "")
+
+
+def _same_date(a: str, b: str) -> bool:
+    """Loose date equality across ISO / US formats (digit-set comparison)."""
+    da = sorted(re.findall(r"\d+", a or ""))
+    db = sorted(re.findall(r"\d+", b or ""))
+    return bool(da) and da == db
+
+
+def isolate_product(text=None, pages: Optional[List[str]] = None,
+                    target_name: str = "", target_lab_id: str = "", target_batch: str = "",
+                    target_registration_number: str = "", target_sample_id: str = "",
+                    target_test_date: str = "") -> Tuple[Optional[str], float, str]:
+    """Return ``(block_text, confidence, reason)`` for the product matching the registry record,
+    or ``(None, 0.0, reason)`` when it cannot be isolated confidently (caller must route to
+    manual review). Thin wrapper over ``match_block`` that returns the matched block's TEXT."""
     doc = analyze_document(text=text, pages=pages)
     products = doc["products"]
-
-    # 0 or 1 resolvable product blocks => nothing to split; parse the WHOLE document. This is the
-    # common case (an ordinary single-product COA), and it must NOT be suppressed even if a weak
-    # multi-product signal fired (e.g. a COA that merely mentions 2 registration numbers): suppressing
-    # a legitimate single-product COA would drop real findings.
+    # 0 or 1 resolvable blocks => nothing to split; parse the WHOLE document. The common single-product
+    # case must NOT be suppressed even if a weak signal fired (e.g. a COA mentioning 2 reg numbers).
     if doc["n_products"] <= 1:
         if products:
             return (products[0]["text"], 1.0, "single-product document")
         whole = text if text is not None else "\n".join(pages or [])
         return (whole, 1.0, "single-product document")
-
-    # --- multi-product: must pin the registry record to exactly one block ---
-    tgt_id = lab_id(target_lab_id) if target_lab_id else ""
-    if tgt_id:
-        hit = [p for p in products if p["lab_id"] == tgt_id]
-        if len(hit) == 1:
-            return (hit[0]["text"], 1.0, f"matched Laboratory ID# {tgt_id}")
-
-    tnorm = _norm(target_name)
-    if tnorm:
-        exact = [p for p in products if _norm(p["product_description"]) == tnorm]
-        if len(exact) == 1:
-            return (exact[0]["text"], 0.95, "matched product description (exact)")
-
-        # Base-name ties (the Ferrarese case: every block is "Scott's OG #N").
-        # Disambiguate ONLY if the registry record carries a unit marker that
-        # uniquely identifies one block.
-        tgt_unit = _desc_specificity(target_name) or _desc_specificity(target_batch)
-        if tgt_unit:
-            unit_hit = [p for p in products if _desc_specificity(p["product_description"]) == tgt_unit]
-            if len(unit_hit) == 1:
-                return (unit_hit[0]["text"], 0.85, f"matched unit marker #{tgt_unit}")
-
-        # Substring containment, only if unambiguous.
-        contains = [p for p in products if tnorm and tnorm in _norm(p["product_description"])]
-        if len(contains) == 1:
-            return (contains[0]["text"], 0.7, "matched product description (contains)")
-
-    return (None, 0.0,
-            f"ambiguous: {doc['n_products']} products in document, "
-            f"registry record '{target_name or target_lab_id or '?'}' did not "
-            f"uniquely match one block -> route to manual review")
+    block, conf, reason, _strategy = match_block(
+        products, registration_number=target_registration_number, product_name=target_name,
+        lab_id=target_lab_id, sample_id=target_sample_id, batch=target_batch, test_date=target_test_date)
+    if block is not None:
+        return (block["text"], conf, reason)
+    return (None, 0.0, reason + " -> route to manual review")
 
 
 if __name__ == "__main__":  # tiny smoke test against a cached OCR dump

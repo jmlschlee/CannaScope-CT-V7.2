@@ -2,7 +2,40 @@
 
 All notable changes to this project are documented here.
 
-## [16.3.3] — 2026-06-05 — CannaScope CT V16.3.3 — current release
+## [16.3.4] — 2026-06-05 — CannaScope CT V16.3.4 — current release
+
+Multi-product COA data integrity: parse once, cache every product block separately, never
+cross-attribute. `ANALYSIS_VERSION` → 16.3.4 (cache-path runs unchanged; only cold/online reads
+affected). All prior releases remain live.
+
+### Added
+- Per-PDF structured block cache (`Multi-Product COA Cache.json`, content-hash keyed): a multi-product
+  PDF is parsed ONCE; each product block is stored with its own identifiers (lab ID, sample ID, batch,
+  product description, registration numbers, test date) AND its own measurements (cannabinoids,
+  microbials, pesticides, heavy metals, solvents, pass/fail, mold/yeast CFU). Records sharing the PDF
+  reuse their matched block from cache.
+- Ranked identifier matching (`cannascope_multiproduct.match_block`): lab ID → registration number →
+  sample ID → batch → product description → unique unit marker. A strong identifier matching >1 block is
+  ambiguous and fails (no weaker fallback). Per-block extractors for sample ID, batch, test date,
+  registration numbers.
+- Source audit binds to the matched block: published flagged values from a multi-product COA are
+  re-verified against THEIR product block (metric `multi_product_rows_verified_against_matched_block`),
+  not merely somewhere in the shared PDF. Binding survives cache rehydration via the stored block id.
+- Regression `_test_multiproduct_cache.py` (19 data-integrity checks incl. an 11-product COA);
+  `_test_multiproduct.py` → 19 checks.
+
+### Changed
+- `_process_product` multi-product branch reuses the cached per-block extraction (parse once) and applies
+  ONLY the matched block's measurements; unmatched records are suppressed → `COA Needs Manual Review`.
+- Engages only when 2+ resolvable blocks exist (single-product COAs never suppressed); cache hits
+  preserve the same per-product isolation as fresh parses.
+
+### Note
+- Rebuild the offline COA cache online (`build-cache`) to re-extract any multi-product records cached by
+  the older single-product parser. Known limitation (tracked): two-column OCR microbial tables on
+  isolated one-per-page blocks aren't yet associated (those isolate to empty — safe, never a wrong value).
+
+## [16.3.3] — 2026-06-05 — CannaScope CT V16.3.3 
 
 Multi-product COA per-product isolation on the published path (fixes cross-attribution) + OCR page-cap
 fix. `ANALYSIS_VERSION` 16.3.0 → 16.3.3 (cold-read extraction can change; cache-path runs unchanged).
