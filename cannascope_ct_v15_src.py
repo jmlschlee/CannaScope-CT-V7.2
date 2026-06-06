@@ -74,11 +74,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V16.2.1"
+APP_NAME = "CannaScope CT V16.2.2"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "16.2.1"
+SOFTWARE_VERSION = "16.2.2"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -3677,7 +3677,10 @@ def build_pdf(out_path, report_no, ctx):
             "batch, lot, BioTrack, sample, or product-code identifier) appears on <b>more than one record or COA "
             "reference</b> — whether the values, dates, lab, or pass/fail status changed or not. It is included so a "
             "reviewer can <b>compare the versions</b>: did the COA, the test values, the pass/fail status, the dates, "
-            "or other lab-reported details change between them? Repeated or identical records are kept on purpose (not "
+            "or other lab-reported details change between them? <b>The cases are ordered so the most informative come "
+            "first — records where the reported analytical result actually changed (a compliance flip, then any value "
+            "or status change) — followed last by records that differ only in administrative metadata</b>, regardless "
+            "of whether the test dates match. Repeated or identical records are kept on purpose (not "
             "discarded) so nothing is hidden from that comparison. One specific sub-pattern is called out separately: "
             "the <b>lab-shopping</b> pattern — the same lot that <b>failed the limit on one lab's COA and then passed "
             "a retest at a different lab</b> (pass/fail judged against the limit printed on each COA, since CT's "
@@ -3705,12 +3708,37 @@ def build_pdf(out_path, report_no, ctx):
                 f"({stored:,} COA fingerprints from this and prior runs), so conflicts whose COAs were "
                 f"scanned in different runs are included and earlier findings are not lost on a rerun.</i>",
                 TREND))
+        # "What changed" scoreboard — so a reader sees the breakdown at a glance and knows the cases are
+        # ordered RESULT-CHANGES-FIRST. Counts by what actually differs between the COAs.
+        _n_comp = sum(1 for c in items if c.get("change_class") == "compliance_changed")
+        _n_res = sum(1 for c in items if c.get("change_class") == "result_changed")
+        _n_meta = sum(1 for c in items if c.get("change_class") == "metadata_only")
+        story.append(Paragraph(
+            f"<b>What changed across these {len(items)} case(s)</b> — listed <b>result-changes first</b>, "
+            "metadata-only differences last:<br/>"
+            f"• <b>{_n_comp}</b> where the <b>compliance outcome changed</b> (PASS↔FAIL or DETECTED↔ND) — the most "
+            "significant to review.<br/>"
+            f"• <b>{_n_res}</b> where the <b>reported analytical result changed</b> (different value or status) but the "
+            "pass/fail outcome stayed the same.<br/>"
+            f"• <b>{_n_meta}</b> where the <b>reported results are identical</b> and only administrative metadata "
+            "(COA reference, date) differs — kept for completeness, least significant.",
+            ParagraphStyle("scbx", parent=CTX, fontSize=9.5, leading=13, alignment=0,
+                           textColor=colors.HexColor("#2c3e50"), backColor=colors.HexColor("#eef3f8"),
+                           borderColor=colors.HexColor("#cdd8e4"), borderWidth=0.6, borderPadding=6,
+                           spaceBefore=10, spaceAfter=10)))
+
+        # Prominent, color-coded "what changed" tag leading each case head.
+        _CHG_TAG = {"compliance_changed": ("#C0392B", "RESULT CHANGED — compliance outcome"),
+                    "result_changed": ("#9A6B00", "RESULT CHANGED"),
+                    "metadata_only": ("#5b6b7a", "METADATA ONLY — results identical")}
 
         def case_block(i, c):
             sc = SEVCOL.get(c["severity"], "#555555")
             a, b = c["lab1"], c["lab2"]
             rel = c.get("relationship", "")
+            _ccol, _ctag = _CHG_TAG.get(c.get("change_class"), ("#555", "Review"))
             head = Paragraph(
+                f'<font color="{_ccol}"><b>[{esc(_ctag)}]</b></font> '
                 f'<font color="{sc}"><b>Case {i} — {esc(c["severity"])}: {esc(c["category"])}</b></font>'
                 + (f' &nbsp;<font color="#555">[{esc(rel)}]</font>' if rel else '')
                 + (' &nbsp;<font color="#C0392B"><b>[earlier failed result followed by later passing result]</b></font>'
@@ -5842,14 +5870,55 @@ def _diff_text(a, b):
     return out
 
 
+# What CHANGED between the two COAs — the primary thing a reviewer wants to see first. Ordered so the
+# section can lead with result changes and end with metadata-only differences.
+_CHANGE_RANK = {"compliance_changed": 3, "result_changed": 2, "metadata_only": 1}
+
+
+def _classify_change(a, b, kind):
+    """Classify the difference between two records for the same identifier, so the section can
+    prioritize RESULT changes over metadata-only differences. Returns (change_class, change_size,
+    substantial, label):
+      compliance_changed — the pass/fail or detected/not-detected OUTCOME differs (most significant);
+      result_changed     — the reported analytical result differs (different value, or a status change
+                           that isn't a compliance flip) while the compliance outcome is unchanged;
+      metadata_only      — the reported results are identical; only administrative fields differ.
+    change_size is a 0+ magnitude (RPD%) used to order result_changed cases big-first."""
+    if kind == "within-document":
+        return ("compliance_changed", 1e9, True, "Conflicting results within one document")
+    sa, sb = a.get("status"), b.get("status")
+    adverse, clean = {"FAIL", "DETECTED"}, {"PASS", "ND"}
+    if ({sa, sb} & adverse) and ({sa, sb} & clean):
+        return ("compliance_changed", 1e9, True,
+                f"Compliance outcome changed ({esc_min(sa)} vs {esc_min(sb)})")
+    m = _swing_metrics(a, b)
+    num_diff = m.get("comparable") and m.get("abs_diff", 0) and float(a["value"]) != float(b["value"])
+    status_diff = (sa != sb)
+    if num_diff:
+        size = m.get("rpd") or m.get("pct_diff") or 0.0
+        substantial = bool(m.get("large_swing"))
+        return ("result_changed", size, substantial,
+                ("Reported result changed — substantial" if substantial else "Reported result changed — minor"))
+    if status_diff:
+        return ("result_changed", 0.0, True, f"Reported result changed ({esc_min(sa)} vs {esc_min(sb)})")
+    return ("metadata_only", 0.0, False, "Results identical — only administrative metadata differs")
+
+
+def esc_min(s):
+    return (s or "—")
+
+
 def _make_finding(category, members, severity, kind="cross-record",
                   fail_then_pass=False, timeline="", note=""):
     a, b = _pick_pair(members) if len(members) >= 2 else (members[0], members[0])
     lim = next((m.get("limit") for m in members if m.get("limit") is not None), None)
     cfp0 = members[0]["cfp"]
+    change_class, change_size, substantial, change_label = _classify_change(a, b, kind)
     return dict(
         kind=kind, category=category, severity=severity, fail_then_pass=fail_then_pass,
         relationship=_relationship(members, kind, fail_then_pass),
+        change_class=change_class, change_size=change_size,
+        change_substantial=substantial, change_label=change_label,
         timeline=timeline, note=note,
         product=cfp0.get("product", ""),
         strain=cfp0.get("strain", ""),
@@ -5980,8 +6049,16 @@ def detect_coa_conflicts(fingerprints, watch):
         intl = c.get("internal")
         if intl and (intl.get("multi_lab") or (intl.get("safe_fail") and intl.get("has_pass"))):
             findings.append(_internal_finding(c, watch))
-    findings.sort(key=lambda f: (_SEV_RANK.get(f["severity"], 0), f.get("fail_then_pass", False)),
-                  reverse=True)
+    # PRIORITIZE BY WHAT CHANGED (what a reviewer wants first): compliance-outcome changes, then
+    # changed analytical results (largest change first), then metadata-only differences last. Severity
+    # and earlier-fail-then-later-pass remain tie-breakers within each change class.
+    findings.sort(key=lambda f: (
+        _CHANGE_RANK.get(f.get("change_class"), 0),
+        1 if f.get("change_substantial") else 0,
+        float(f.get("change_size") or 0.0),
+        _SEV_RANK.get(f["severity"], 0),
+        f.get("fail_then_pass", False),
+    ), reverse=True)
     return findings
 
 
