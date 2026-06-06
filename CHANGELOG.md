@@ -2,7 +2,30 @@
 
 All notable changes to this project are documented here.
 
-## [16.2.1] — 2026-06-05 — CannaScope CT V16.2.1 — current release
+## [16.2.2] — 2026-06-05 — CannaScope CT V16.2.2 — current release
+
+Reprioritizes the Multiple/Conflicting COA Records section to lead with cases where the reported
+analytical RESULT changed between COAs, ending with metadata-only differences. No detection logic
+changed; nothing removed; `ANALYSIS_VERSION` stays 15.1.0.
+
+### Changed
+- Conflict findings are ordered by **what changed**: compliance-outcome changes (PASS↔FAIL, DETECTED↔ND)
+  first, then changed analytical results (largest first), then metadata-only differences last —
+  independent of whether the dates match. Severity is now only a tie-breaker.
+- Each case head shows a color-coded tag: `[RESULT CHANGED — compliance outcome]` / `[RESULT CHANGED]` /
+  `[METADATA ONLY — results identical]`.
+- New "What changed" scoreboard at the top of the section (counts by change class).
+- Section intro states the result-changes-first ordering.
+
+### Added
+- `change_class` / `change_size` / `change_substantial` on each conflict finding (`_classify_change`);
+  `detect_coa_conflicts` sorts by change class → magnitude → severity.
+
+### Unchanged / preserved
+Metadata-only records are retained (ranked last, not removed); per-case Compare line + side-by-side
+table; conservative non-accusatory tone; thresholds; report numbering.
+
+## [16.2.1] — 2026-06-05 — CannaScope CT V16.2.1 
 
 Crash fix: the V16.2.0 plain-English debug-log table could raise a ReportLab `LayoutError` on large /
 all-time reports when a long metric value (e.g. `validation_warn_reasons`) wrapped into a cell taller
