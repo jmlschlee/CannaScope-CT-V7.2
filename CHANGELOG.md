@@ -2,7 +2,31 @@
 
 All notable changes to this project are documented here.
 
-## [16.3.7] — 2026-06-06 — CannaScope CT V16.3.7 — current release
+## [16.3.8] — 2026-06-06 — CannaScope CT V16.3.8 — current release
+
+Date-window integrity + independent live end-to-end verification + hosted-app contrast fix. Informational
+tool; results are leads to verify against the official COA, not conclusions. `ANALYSIS_VERSION` → 16.3.8.
+Additive — all prior releases remain available.
+
+### Added
+- Date-window integrity: statewide reports include ONLY records whose COA test date is within the requested
+  window. Single enforcement chokepoint (cache-reloaded + fresh alike); out-of-window and no-test-date
+  records excluded and counted; hard MIN/MAX validation aborts with a "DATE INTEGRITY" error instead of
+  publishing if anything is out of range; new Date-Window Integrity section in the report + debug log;
+  regression across 2015→2026 windows.
+
+### Verified
+- Independent re-read of every value-carrying 2015–2026 record (15,803), live-pulling 9,461 COAs fresh and
+  checking per-product block attribution: 0 cross-attribution found.
+
+### Fixed
+- Hosted Streamlit app: pinned light theme + forced high-contrast dark text and form controls (renders
+  correctly regardless of the visitor's dark-mode setting); dynamic version badge; offline cache-backed modes.
+
+### Changed
+- Refreshed/embedded the triple-verified COA dataset for fast offline reports.
+
+## [16.3.7] — 2026-06-06 — CannaScope CT V16.3.7 
 
 CRITICAL data-integrity fix: stop cross-attribution of COA results between products. `ANALYSIS_VERSION`
 → 16.3.7; `OCR_CACHE_VERSION` → 2. All prior releases remain live.

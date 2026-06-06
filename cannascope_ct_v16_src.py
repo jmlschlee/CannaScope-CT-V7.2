@@ -78,11 +78,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V16.3.7"
+APP_NAME = "CannaScope CT V16.3.8"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "16.3.7"
+SOFTWARE_VERSION = "16.3.8"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -326,7 +326,7 @@ SELF_IMPROVE_LOG = os.path.join(OUT_DIR, "Self-Improvement Log.json")
 # stamped AND every UNSTAMPED legacy-ledger record then becomes stale and is re-evaluated by the
 # `audit-cache` subcommand. (The existing legacy ledger is entirely unstamped, so all of it is a
 # re-eval candidate — which is exactly the pre-V16 concern: records skipped before newer logic.)
-ANALYSIS_VERSION = "16.3.7"   # BUMP on any detection-logic change (product-type guardrail, potency
+ANALYSIS_VERSION = "16.3.8"   # BUMP on any detection-logic change (product-type guardrail, potency
                               # math, microbial bound handling, limit selection, self-audit categories,
                               # multi-product per-product isolation). The clean-ledger is stamped with
                               # this; entries from an OLDER analysis version are NOT trusted as clean and
@@ -510,6 +510,72 @@ def fmt_date(s: str) -> str:
 def test_date(p) -> str:
     """Display testing date: parsed COA date, else the registry approval date."""
     return fmt_date(getattr(p, "testing_date", "") or p.approval_date)
+
+
+# ============================================================================
+# DATE-WINDOW INTEGRITY (provable end-to-end). A statewide report must contain ONLY records whose COA
+# TEST date falls inside the requested window — so every finding, statistic, ranking and conclusion is
+# generated exclusively from in-window records. We enforce on the COA test date (what patients/lawyers
+# rely on), NOT the registry approval date (the upstream prefilter uses approval date and the two diverge).
+# A record with NO confirmable COA test date is EXCLUDED (it cannot be proven in-window) and counted.
+# ============================================================================
+def _record_test_date_tuple(p):
+    """The record's COA TEST date as a (y,m,d) tuple, or None if there is no confirmable test date.
+    Uses ONLY the COA-derived testing_date — never the approval-date fallback (which would let an
+    undatable record pass as in-window)."""
+    d = getattr(p, "testing_date", "") or ""
+    t = v4.parse_date(d) if d else (0, 0, 0)
+    return t if (t and t[0]) else None
+
+
+def _fmt_tuple(t):
+    return f"{t[0]:04d}-{t[1]:02d}-{t[2]:02d}" if t else ""
+
+
+def enforce_date_window(records, since, until):
+    """Partition `records` by COA test date against the requested window [since, until]. Returns
+    (in_window, out_of_window, no_test_date, trace). Only `in_window` should feed findings/stats."""
+    lo = tuple(since) if since else (0, 0, 0)
+    hi = tuple(until) if until else (9999, 12, 31)
+    in_win, out_win, no_date = [], [], []
+    for p in records:
+        t = _record_test_date_tuple(p)
+        if t is None:
+            no_date.append(p)
+        elif lo <= t <= hi:
+            in_win.append(p)
+        else:
+            out_win.append(p)
+    dts = sorted(t for t in (_record_test_date_tuple(p) for p in in_win) if t)
+    trace = {
+        "requested_start": (_fmt_tuple(lo) if since else "any"),
+        "requested_end": (_fmt_tuple(hi) if until else f"{datetime.date.today():%Y-%m-%d}"),
+        "records_before_filter": len(records),
+        "records_after_filter": len(in_win),
+        "excluded_out_of_window": len(out_win),
+        "excluded_no_test_date": len(no_date),
+        "actual_earliest_test_date": (_fmt_tuple(dts[0]) if dts else ""),
+        "actual_latest_test_date": (_fmt_tuple(dts[-1]) if dts else ""),
+    }
+    return in_win, out_win, no_date, trace
+
+
+def validate_date_window(in_window, since, until):
+    """HARD validation: confirm every in-window record's COA test date is within [since, until].
+    Returns (ok, message). This is the safety net that proves the filter worked."""
+    lo = tuple(since) if since else (0, 0, 0)
+    hi = tuple(until) if until else (9999, 12, 31)
+    bad = []
+    for p in in_window:
+        t = _record_test_date_tuple(p)
+        if t is None or not (lo <= t <= hi):
+            bad.append(p)
+    if bad:
+        return False, f"{len(bad)} published record(s) fall outside the requested window after filtering"
+    dts = [t for t in (_record_test_date_tuple(p) for p in in_window) if t]
+    if dts and (min(dts) < lo or max(dts) > hi):
+        return False, "MIN/MAX COA test date falls outside the requested window"
+    return True, "all records within the requested window"
 
 
 # ============================================================================
@@ -3914,6 +3980,29 @@ def build_pdf(out_path, report_no, ctx):
         "rows) are documented in the <b>Coverage Gaps / Unvalidated COAs</b> and <b>Software Self-Enhancement &amp; "
         "Self-Audit</b> sections near the end.</i>", TREND))
     story.append(Spacer(1, 9))
+
+    # ---- DATE-WINDOW INTEGRITY (transparency; pairs with the Debug Log) — proves every finding,
+    #      statistic, ranking and conclusion came ONLY from records inside the requested window.
+    _dt = ctx.get("date_trace") or {}
+    if _dt:
+        _passed = _dt.get("validation") == "PASS"
+        story.append(Paragraph("Date-Window Integrity", miniH))
+        story.append(Paragraph(
+            f"<b>Requested window:</b> {esc(_dt.get('requested_start',''))} to {esc(_dt.get('requested_end',''))}<br/>"
+            f"<b>Actual dataset window (COA test dates):</b> "
+            f"{esc(_dt.get('actual_earliest_test_date','') or 'n/a')} to "
+            f"{esc(_dt.get('actual_latest_test_date','') or 'n/a')}<br/>"
+            f"<b>Records before date filter:</b> {_dt.get('records_before_filter',0):,}<br/>"
+            f"<b>Records after date filter (analyzed):</b> {_dt.get('records_after_filter',0):,}<br/>"
+            f"<b>Excluded — outside requested window:</b> {_dt.get('excluded_out_of_window',0):,}<br/>"
+            f"<b>Excluded — no confirmable COA test date:</b> {_dt.get('excluded_no_test_date',0):,}<br/>"
+            f"<b>Validation:</b> " + ("PASS — every analyzed record's COA test date is within the requested "
+            "window." if _passed else "FAIL — DATE INTEGRITY ERROR."), TREND))
+        story.append(Paragraph(
+            "<i>Enforced on the COA test date at a single chokepoint (cache-reloaded and freshly-read records "
+            "alike), so no cached, historical, merged, or section-level path can include out-of-window data. "
+            "If any out-of-window record survived, the run aborts instead of publishing.</i>", TREND))
+        story.append(Spacer(1, 9))
 
     ai = ctx["analyte_items"]
     metals = sorted([pd for k in ("arsenic", "chromium", "cadmium", "lead", "mercury") for pd in ai[k]],
@@ -7820,6 +7909,38 @@ def main():
     for p in all_results:
         p._watch = watch
 
+    # ---- DATE-WINDOW INTEGRITY ENFORCEMENT (single chokepoint; COA test-date based) ----
+    # The upstream prefilter bounds the registry by APPROVAL date; here we enforce the requested window on
+    # the COA TEST date for the FINAL analyzed dataset, so every finding / statistic / ranking / CSV / PDF
+    # downstream is provably in-window. Out-of-window and undatable records are EXCLUDED (and counted),
+    # never analyzed. Because cache-rehydrated and freshly-read records both pass through this one filter,
+    # no cached/historical/merged/section path can bypass the window.
+    _dw_before = len(all_results)
+    all_results, _dw_out, _dw_nodate, date_trace = enforce_date_window(all_results, since, until)
+    _keep_ids = {id(p) for p in all_results}            # ProductV5 is an unhashable dataclass -> use id()
+    keep = [p for p in keep if id(p) in _keep_ids]
+    print(f"  Date-window enforcement (COA test date {date_trace['requested_start']} to "
+          f"{date_trace['requested_end']}): {date_trace['records_after_filter']:,} in-window of "
+          f"{_dw_before:,} (excluded {date_trace['excluded_out_of_window']:,} out-of-window, "
+          f"{date_trace['excluded_no_test_date']:,} with no confirmable test date).")
+    # HARD VALIDATION + PUBLICATION SAFETY RULE: if any out-of-window record survived, ABORT — never
+    # publish potentially misleading findings.
+    _dw_ok, _dw_msg = validate_date_window(all_results, since, until)
+    date_trace["validation"] = "PASS" if _dw_ok else "FAIL"
+    if not _dw_ok:
+        print("\n" + "=" * 74)
+        print("  DATE WINDOW INTEGRITY FAILURE:")
+        print("  Dataset contains records outside requested reporting period.")
+        print(f"    {_dw_msg}")
+        print(f"    Requested window : {date_trace['requested_start']} to {date_trace['requested_end']}")
+        print(f"    Actual dataset   : {date_trace['actual_earliest_test_date']} to "
+              f"{date_trace['actual_latest_test_date']}")
+        print("  FAIL – DATE INTEGRITY ERROR — report NOT generated.")
+        print("=" * 74)
+        sys.exit(2)
+    if not all_results:
+        sys.exit("No in-window records after date-window enforcement — nothing to report for this window.")
+
     ident = Identity(pmap, all_results)
 
     # report-flagged set (trustworthy severity) and publishable subset
@@ -8113,6 +8234,15 @@ def main():
         "conflicting_coa_earlier_fail_later_pass": sum(1 for c in coa_conflicts if c.get("fail_then_pass")),
     })
     debug.update(src_metrics)   # V15 COA source-binding audit metrics
+    # Date-window integrity trace (Debug Log + Validation Appendix).
+    debug["date_window_requested"] = f"{date_trace['requested_start']} to {date_trace['requested_end']}"
+    debug["date_window_actual_dataset"] = (f"{date_trace['actual_earliest_test_date']} to "
+                                           f"{date_trace['actual_latest_test_date']}") if date_trace['actual_earliest_test_date'] else "n/a"
+    debug["date_window_records_before_filter"] = date_trace["records_before_filter"]
+    debug["date_window_records_after_filter"] = date_trace["records_after_filter"]
+    debug["date_window_excluded_out_of_window"] = date_trace["excluded_out_of_window"]
+    debug["date_window_excluded_no_test_date"] = date_trace["excluded_no_test_date"]
+    debug["date_window_validation"] = date_trace["validation"]
     # Source-binding: did any product that REMAINS in the published set still carry a value not
     # verified in its own linked COA? (Keyed by unique registration number, so good values from
     # EXCLUDED products are never mistaken for a published failure.)
@@ -8140,6 +8270,7 @@ def main():
     prior_run = prior_log[-1] if prior_log else None
 
     ctx = dict(draft=draft, status=status, pmap=pmap, lmap=lmap, ident=ident, watch=watch, window=window,
+               date_trace=date_trace,
                self_audit_obs=self_audit_obs, prior_run=prior_run, self_improve_runs=len(prior_log) + 1,
                legal_records=legal_records, legal_unreachable=legal_unreachable,
                reg_corroboration=reg_corroboration(all_results),

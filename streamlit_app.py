@@ -63,6 +63,23 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
+/* ===== HARD LIGHT MODE: stop the visitor's OS/browser dark mode from inverting text or native form
+   controls (the white-on-white / dark-widget contrast bug). Explicit dark text on light surfaces. ===== */
+:root, html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+  color-scheme: light !important; }
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container,
+[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stSidebar"] {
+  background-color:#ffffff !important; }
+/* default every text node to dark; brand-colored rules below use !important so they still win */
+.stApp, .stApp p, .stApp li, .stApp span, .stApp label, .stApp small,
+.stMarkdown, [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] * { color:#16271d; }
+/* form fields + dropdown popovers: dark text on white, readable everywhere */
+.stTextInput input, .stNumberInput input, textarea,
+[data-baseweb="select"], [data-baseweb="select"] *, [data-baseweb="input"] *,
+[data-baseweb="popover"], [data-baseweb="popover"] *, [role="listbox"], [role="option"] {
+  color:#16271d !important; background-color:#ffffff !important; }
+[data-baseweb="select"] svg, [data-testid="stExpander"] svg { fill:#16271d !important; }
+
 /* ---- type system: Inter everywhere, comfortable body, strong dark text ---- */
 html, body, [class*="css"], .stMarkdown, .stMarkdown p, .stButton>button, input, textarea,
 label, .stSelectbox, [data-baseweb="select"] * {
