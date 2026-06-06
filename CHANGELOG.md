@@ -2,7 +2,28 @@
 
 All notable changes to this project are documented here.
 
-## [16.3.6] — 2026-06-05 — CannaScope CT V16.3.6 — current release
+## [16.3.7] — 2026-06-06 — CannaScope CT V16.3.7 — current release
+
+CRITICAL data-integrity fix: stop cross-attribution of COA results between products. `ANALYSIS_VERSION`
+→ 16.3.7; `OCR_CACHE_VERSION` → 2. All prior releases remain live.
+
+### Fixed
+- Cross-attribution: a multi-product / mis-linked COA could publish one product's results under another
+  product's name (e.g. a "Seraden Wax" record whose COA is actually a multi-product Scott's OG document
+  published Scott's OG's failing Yeast & Mold as Seraden Wax's). Two causes fixed:
+  - Stale OCR cache: `OCR_CACHE_VERSION` 1→2 — the page cap had gone 6→40 without bumping the cache
+    version, so truncated 6-page OCR hid later products and defeated multi-product detection. Forces full re-OCR.
+  - Permissive publish gate: `validate_coa_row` published a "Verified Partial Match" on mere value-presence.
+    New `_coa_is_different_product()` guard marks a COA whose printed product(s) don't match the registry
+    record as `COA Product Mismatch` (routed to review, not published) — even if a value appears.
+- Rebuilt the embedded COA cache for 2015–2021 with full re-OCR + the new gate, removing these
+  cross-attributed values from the bundled dataset.
+
+### Unchanged
+- Genuine matches still publish; ID-only COAs (no printed product description) still pass as partial.
+- The 16.3.4 multi-product mechanism + 16.3.6 columnar OCR microbial reader remain in place.
+
+## [16.3.6] — 2026-06-05 — CannaScope CT V16.3.6 
 
 Two-column OCR microbial-table reader + 2015–2021 cache rebuild. `ANALYSIS_VERSION` → 16.3.6;
 `MULTIPRODUCT_CACHE_VERSION` → 2. All prior releases remain live.

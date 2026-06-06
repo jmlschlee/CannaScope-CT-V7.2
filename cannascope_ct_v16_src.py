@@ -78,11 +78,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V16.3.6"
+APP_NAME = "CannaScope CT V16.3.7"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "16.3.6"
+SOFTWARE_VERSION = "16.3.7"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -326,7 +326,7 @@ SELF_IMPROVE_LOG = os.path.join(OUT_DIR, "Self-Improvement Log.json")
 # stamped AND every UNSTAMPED legacy-ledger record then becomes stale and is re-evaluated by the
 # `audit-cache` subcommand. (The existing legacy ledger is entirely unstamped, so all of it is a
 # re-eval candidate — which is exactly the pre-V16 concern: records skipped before newer logic.)
-ANALYSIS_VERSION = "16.3.6"   # BUMP on any detection-logic change (product-type guardrail, potency
+ANALYSIS_VERSION = "16.3.7"   # BUMP on any detection-logic change (product-type guardrail, potency
                               # math, microbial bound handling, limit selection, self-audit categories,
                               # multi-product per-product isolation). The clean-ledger is stamped with
                               # this; entries from an OLDER analysis version are NOT trusted as clean and
@@ -345,7 +345,9 @@ AUDIT_STAMPS = os.path.join(OUT_DIR, "Cache Audit Stamps.json")   # {coa_key: {a
 # OCR_CACHE_VERSION is part of every key: bump it to invalidate all entries when the render/OCR logic
 # changes materially (e.g. the escalating-DPI ladder).
 OCR_TEXT_CACHE = os.path.join(OUT_DIR, "OCR Text Cache.json")
-OCR_CACHE_VERSION = 1
+OCR_CACHE_VERSION = 2   # bumped when the OCR page cap went 6->40 (v16.3.7): old truncated 6-page OCR
+                        # text hid later products in multi-product COAs -> cross-attribution. v2 forces
+                        # full re-OCR so multi-product detection sees every product block.
 AUDIT_PROGRESS = "v16_cache_audit_progress.json"                  # repo-root resumable progress state (atomic)
 AUDIT_HANDOFF = "V16_CACHE_AUDIT_HANDOFF.md"                      # repo-root human-readable handoff
 # Report filenames now follow the PDF REPORT NAMING STANDARD (see report_filename / next_report_path):
@@ -1194,6 +1196,28 @@ def _limit_match_review(d, p) -> bool:
     return any(abs(v - L) < 1e-9 for L in REG_LIMIT_VALUES)
 
 
+def _coa_is_different_product(text, name_tokens) -> bool:
+    """True iff the COA prints a recognizable product description (or descriptions, for a multi-product
+    document) and NONE of them share a meaningful token with this registry record's name — i.e. the COA
+    is for a different product. Conservative: if the COA prints no recognizable product description, this
+    returns False (so genuine ID-only COAs are not falsely rejected)."""
+    if mp is None or not name_tokens:
+        return False
+    try:
+        descs = {b.get("product_description", "") for b in mp.extract_blocks(text=text)}
+    except Exception:
+        return False
+    descs = {d for d in descs if d}
+    if not descs:
+        return False
+    regset = set(name_tokens)
+    for d in descs:
+        dtoks = {t for t in re.split(r"[^a-z0-9]+", d.lower()) if len(t) >= 3 and not t.isdigit()}
+        if dtoks & regset:
+            return False              # a printed product overlaps this record's name -> not a mismatch
+    return True                       # COA prints product(s); none match this registry record
+
+
 def validate_coa_row(p, text) -> str:
     """Live COA Match Status — flag only SUBSTANTIVE conflicts, never cosmetic ones
     (capitalization / punctuation / spacing / abbreviation / formatting differences).
@@ -1254,8 +1278,15 @@ def validate_coa_row(p, text) -> str:
         p._qd_cache = None                     # _coa_unverified flags take effect
     if name_ok:
         return MATCH_EXACT            # product confirmed in the COA -> Verified
+    # CROSS-ATTRIBUTION GUARD: a flagged value appearing in the COA is NOT enough — if the COA prints a
+    # clearly DIFFERENT product than this registry record (a mis-linked or multi-product document that
+    # doesn't contain this product), publishing its values would attribute another product's results to
+    # this one. Route to manual review instead, even though a value technically "appears" in the text.
+    if _coa_is_different_product(text, name_tokens):
+        return MATCH_PRODUCT_MISMATCH
     if val_ok:
-        return MATCH_PARTIAL          # at least one value confirmed; name not textual
+        return MATCH_PARTIAL          # name not textual, but no conflicting product identity (e.g. an
+                                      # ID-only COA) and a value is confirmed -> partial
     return MATCH_PRODUCT_MISMATCH     # neither product nor any value found -> queue
 
 
