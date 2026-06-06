@@ -14,6 +14,7 @@ def bin_blob(path):
 NAMES, V4, V5, WORKER = (blob('ct_cannabis_names.py'), blob('cannascope_ct_v4.py'),
                          blob('cannascope_ct_v5.py'), blob('cannascope_ocr_worker.py'))
 CC = blob('coa_csv_cache.py')   # COA->measurement cache (imports v4/v5; install AFTER them)
+MP = blob('cannascope_multiproduct.py')   # multi-product COA recognition/isolation (pure-stdlib)
 
 # Embedded caches (baked to speed first-time use; base64 has no '%', so it is template-safe).
 # Prefer the V16 folder; fall back to the V15 folder (and older) so a not-yet-migrated checkout still builds.
@@ -80,7 +81,7 @@ TWO REPORTS
   "output/consumer_concerns/". Reports are NEVER overwritten (numbered + timestamped).
 """
 import base64 as _b64, os as _os, sys as _sys, tempfile as _tmp, types as _types, zlib as _zlib
-_EMBEDDED = {"ct_cannabis_names": %(NAMES)r, "cannascope_ct_v4": %(V4)r, "cannascope_ct_v5": %(V5)r, "coa_csv_cache": %(CC)r}
+_EMBEDDED = {"ct_cannabis_names": %(NAMES)r, "cannascope_ct_v4": %(V4)r, "cannascope_ct_v5": %(V5)r, "coa_csv_cache": %(CC)r, "cannascope_multiproduct": %(MP)r}
 _OCR_WORKER_SRC_B64 = %(WORKER)r
 _EMBEDDED_REGISTRY_B64 = %(REG)r
 _EMBEDDED_REGISTRY_EPOCH = %(REG_EPOCH)d
@@ -89,7 +90,7 @@ _EMBEDDED_COA_CACHE_B64 = %(COA_CACHE)r
 _EMBEDDED_REG_LEDGER_B64 = %(REG_LEDGER)r
 def _install_embedded():
     base=_os.getcwd()
-    for name in ("ct_cannabis_names","cannascope_ct_v4","cannascope_ct_v5","coa_csv_cache"):
+    for name in ("ct_cannabis_names","cannascope_ct_v4","cannascope_ct_v5","coa_csv_cache","cannascope_multiproduct"):
         if name in _sys.modules: continue
         src=_zlib.decompress(_b64.b64decode(_EMBEDDED[name])).decode("utf-8")
         mod=_types.ModuleType(name); mod.__file__=_os.path.join(base,name+".py")
@@ -102,7 +103,7 @@ def _materialize_ocr_worker():
     except Exception: return ""
 _install_embedded()
 # ============================================================================
-''' % dict(NAMES=NAMES, V4=V4, V5=V5, CC=CC, WORKER=WORKER, REG=REG, REG_EPOCH=REG_EPOCH, SKIP=SKIP, COA_CACHE=COA_CACHE, REG_LEDGER=REG_LEDGER)
+''' % dict(NAMES=NAMES, V4=V4, V5=V5, CC=CC, MP=MP, WORKER=WORKER, REG=REG, REG_EPOCH=REG_EPOCH, SKIP=SKIP, COA_CACHE=COA_CACHE, REG_LEDGER=REG_LEDGER)
 out = HEADER + body
 open('CannaScope_CT_V16.py', 'w', encoding='utf-8').write(out)
 print(f'Wrote CannaScope_CT_V16.py ({len(out):,} bytes)')

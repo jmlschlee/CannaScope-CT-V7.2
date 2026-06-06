@@ -2,7 +2,29 @@
 
 All notable changes to this project are documented here.
 
-## [16.3.0] — 2026-06-05 — CannaScope CT V16.3.0 — current release
+## [16.3.2] — 2026-06-05 — CannaScope CT V16.3.2 — current release
+
+Multi-product COA recognition (additive, detection/surface-only). No findings changed; `ANALYSIS_VERSION`
+stays 16.3.0. All prior releases remain live.
+
+### Added
+- Generalized multi-product COA detection learned from a confirmed real 2015 Northeast Laboratories doc:
+  signals on an incrementing Laboratory ID # suffix and/or multiple distinct Product Descriptions (not
+  just `MMBR` registration numbers). Distinguishes one-product/multi-panel (combine pages) from
+  multi-product/one-per-page (separate products) by the Laboratory ID #.
+- New module `cannascope_multiproduct.py` (pure-stdlib, embedded in the single-file build): groups COA
+  pages into products, plus a per-product splitter `isolate_product()` with a route-to-review guardrail
+  (isolates a block only on a confident unique match; otherwise routes to manual review — never
+  cross-attributes).
+- Debug metrics `multi_product_coa_documents`, `multi_product_coa_products_recognized`; self-audit and
+  glossary updated. Regression test `_test_multiproduct.py` (17 checks).
+
+### Not in this release
+- Substituting the isolated per-product block into the PUBLISHED extraction (requires a per-record
+  statewide regression for zero cross-attribution + an OCR page-depth fix + an ANALYSIS_VERSION bump);
+  tracked as the next release.
+
+## [16.3.0] — 2026-06-05 — CannaScope CT V16.3.0 
 
 Parser & data-routing safety fixes (conservative; route-to-review when uncertain). `ANALYSIS_VERSION`
 15.1.0 → 16.3.0. All prior releases remain live.

@@ -58,6 +58,10 @@ try:
     import cannascope_ct_v4 as v4
 except ImportError:
     sys.exit("CannaScope CT V15 needs cannascope_ct_v5.py and cannascope_ct_v4.py beside it.")
+try:
+    import cannascope_multiproduct as mp   # multi-product COA recognition/isolation (pure-stdlib)
+except ImportError:
+    mp = None
 
 # Persistent COA->measurement cache (optional; --csv-cache). Imports v4/v5, so it must load after
 # them (self-contained: installed by _install_embedded before this body runs). Soft-fail: the cache
@@ -74,11 +78,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V16.3.0"
+APP_NAME = "CannaScope CT V16.3.2"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "16.3.0"
+SOFTWARE_VERSION = "16.3.2"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -1668,6 +1672,36 @@ def _process_product(p, session, watch):
     # Per-category presence (does each panel's wording appear at all?) — lets the zero-result
     # logic tell a true historical absence from a parser gap. Computed while the text is in hand.
     p._cat_present = _detect_presence(text)
+    # MULTI-PRODUCT COA DETECTION (2015-era docs sometimes packed several products into ONE document).
+    # DETECTION/SURFACING for now: we do NOT yet substitute the per-product block into the published
+    # extraction (that needs a per-record statewide regression + a version bump, and cross-attribution
+    # risk is unacceptable for a safety report) — this RECOGNIZES the document and surfaces it. It does
+    # not change what is published (these docs currently extract empty, so nothing is suppressed).
+    # Real signatures learned from confirmed 2015 Northeast Laboratories docs (e.g. DearFerrarese.pdf):
+    #   - 2+ distinct Laboratory ID # suffixes (1562829-01, -02 ...)  -> one product per page (Layout B)
+    #   - 2+ distinct Product Description values in one document
+    #   - 2+ distinct CT registration numbers (MMBR.######) — the data.ct.gov-era signal
+    # NOTE: the 2015 lab format puts each product's own panel on a SEPARATE page; pages sharing one
+    # Lab ID are panels of the SAME sample and are correctly COMBINED, never split (Layout A).
+    p._multi_product_coa = False
+    p._multi_product_info = None
+    if mp is not None:
+        try:
+            _mpd = mp.analyze_document(text=text)
+            p._multi_product_coa = bool(_mpd.get("is_multi_product"))
+            if p._multi_product_coa:
+                p._multi_product_info = {
+                    "n_products": _mpd.get("n_products"),
+                    "signal": _mpd.get("signal"),
+                    "layout": _mpd.get("layout"),
+                    "products": [{"lab_id": q.get("lab_id"),
+                                  "product_description": q.get("product_description"),
+                                  "panels": q.get("panels")} for q in _mpd.get("products", [])],
+                }
+        except Exception:
+            # Detection must never break a scan; fall back to the MMBR-only signal.
+            _regs = {m.group(0).upper().replace(" ", "") for m in re.finditer(r"MMBR\.?\s?\d{4,}", text or "")}
+            p._multi_product_coa = (len(_regs) >= 2)
     # COA FORMAT LEARNING LAYER: fingerprint this COA's format + cross-check the extraction
     # while the text is in hand. Stored so the pipeline can hold uncertain extractions and the
     # learner can build a per-year readiness map. Defensive — never let it break a scan.
@@ -3018,6 +3052,17 @@ def generate_self_audit(fmt_year_rows, zero_checks, src_metrics, debug, format_h
             + (f", incl. {_d.get('conflicting_coa_earlier_fail_later_pass',0)} earlier-FAIL→later-PASS." ),
             "Changing results across COAs for one identifier are review leads (and the gate now warns on them).",
             "Compare the versions in the Multiple/Conflicting COA Records section against the live COAs.")
+    if _d.get("multi_product_coa_documents"):
+        add("Multi-product COA documents (2015-era)",
+            f"{_d['multi_product_coa_documents']} COA document(s) appear to contain MORE THAN ONE product "
+            "(2+ distinct Laboratory ID #s, product descriptions, or registration numbers) — the known 2015-era "
+            "Northeast Laboratories layout where each product's panel is on a separate page.",
+            "A per-product splitter exists and is validated (groups pages by Laboratory ID #, combining the "
+            "panels of one sample and isolating distinct products) but block-substitution into the published "
+            "extraction is not yet enabled; these still extract no measurements (a coverage gap, NOT "
+            "cross-attributed). Recognized and surfaced — safe by construction.",
+            "Enable per-product isolation once a per-record statewide regression confirms no cross-attribution; "
+            "records that cannot be uniquely tied to one block are routed to manual review rather than guessed.")
     add("Cache / ledger re-evaluation",
         f"Clean-ledger entries are version-stamped; only those verified under ANALYSIS_VERSION {ANALYSIS_VERSION} "
         "are trusted as skippable — older/legacy-clean records are re-evaluated under the newest rules.",
@@ -4955,6 +5000,8 @@ def build_pdf(out_path, report_no, ctx):
         "potency_parser_conflicts": "Cannabinoid extractions with an internal conflict — held OUT of findings, routed to review.",
         "thc_over_total_cannabinoids_conflicts": "Rows where Total THC > Total Cannabinoids (impossible) — held for COA re-read, not published.",
         "product_type_mismatch_held": "Flower-classified rows with >45% Total THC (implausible for flower) — held for product-type review, not published as high-THC flower.",
+        "multi_product_coa_documents": "COA documents that appear to hold 2+ products (2015-era Northeast Labs layout: distinct Laboratory ID #s / product descriptions / registration numbers) — recognized & surfaced. A validated per-product splitter exists; block-substitution into published extraction is not yet enabled, so these remain a coverage gap (never cross-attributed).",
+        "multi_product_coa_products_recognized": "Total distinct products recognized inside those multi-product documents (pages grouped by Laboratory ID #: panels of one sample are combined, distinct products are separated).",
         "microbial_bound_too_broad_for_consumer_risk": "Microbial '< X CFU/g' bounds above 10,000 — passed dated standard but consumer-risk visibility UNDETERMINED.",
         "self_audit_remaining_issues": "Unresolved self-audit problems this run (target: 0).",
         "below_detect_results_excluded": "Below-detection (<X) results not published as measurements.",
@@ -7704,6 +7751,10 @@ def main():
         "high_thc_noninfused_flower": len(thc_flower),
         "implausible_flower_potency_excluded": implausible_flower,
         "product_type_mismatch_held": len(potency_typemismatch),   # item 1: flower>45% -> held for review
+        "multi_product_coa_documents": sum(1 for p in all_results if getattr(p, "_multi_product_coa", False)),
+        "multi_product_coa_products_recognized": sum(
+            (getattr(p, "_multi_product_info", None) or {}).get("n_products", 0) or 0
+            for p in all_results if getattr(p, "_multi_product_coa", False)),
         "infused_potency_ref": len(infused_potency),
         "vape_concentrate_extract_potency_ref": len(extract_potency),
         "potency_parser_conflicts": sum(1 for p in all_results if thc_conflict(p)),
