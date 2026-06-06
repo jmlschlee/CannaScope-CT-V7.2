@@ -27,7 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 _CANDIDATES = ["CannaScope_CT_V16.py", "cannascope_ct_v16_src.py", "CannaScope_CT_V15.py"]
 SCRIPT = next((c for c in _CANDIDATES if os.path.exists(os.path.join(HERE, c))), None)
 
-STATEWIDE_DIR = "CannaScope CT V15 - Statewide Transparency Reports"
+STATEWIDE_DIR = "CannaScope CT V16 - Statewide Transparency Reports"
 CONSUMER_DIR = os.path.join("output", "consumer_concerns")
 LOCAL_REGISTRY = os.path.join(HERE, STATEWIDE_DIR, "Registry Cache.csv")
 LOCAL_COA_CACHE = os.path.join(HERE, STATEWIDE_DIR, "COA Data Cache.csv")
@@ -111,8 +111,16 @@ def load_products():
 
 
 def _newest_pdf(base, since):
-    pats = [os.path.join(base, "*.pdf"), os.path.join(base, "*", "*.pdf")]
-    cands = [p for pat in pats for p in glob.glob(pat) if os.path.getmtime(p) >= since - 1]
+    pats = [os.path.join(base, "*.pdf"), os.path.join(base, "*", "*.pdf"),
+            os.path.join(base, "**", "*.pdf")]
+    cands = [p for pat in pats for p in glob.glob(pat, recursive=True)
+             if os.path.getmtime(p) >= since - 1]
+    # Fallback so a program output-folder rename (e.g. a version bump) can't hide a freshly written
+    # report: scan any CannaScope output folder under HERE for a PDF created during this run.
+    if not cands:
+        for pat in (os.path.join(HERE, "CannaScope CT V*", "**", "*.pdf"),
+                    os.path.join(HERE, "output", "**", "*.pdf")):
+            cands += [p for p in glob.glob(pat, recursive=True) if os.path.getmtime(p) >= since - 1]
     return max(cands, key=os.path.getmtime) if cands else None
 
 
@@ -145,7 +153,7 @@ def offer_pdf(pdf, label):
 
 
 # ---------------------------------------------------------------- header
-st.markdown('# 🌿 CannaScope CT <span class="cs-badge">V16.0.0</span>', unsafe_allow_html=True)
+st.markdown('# 🌿 CannaScope CT <span class="cs-badge">V16.3.6</span>', unsafe_allow_html=True)
 st.caption("Source-verified Connecticut cannabis transparency reports · 33,000+ triple-verified COAs")
 st.info("**Advisory tool — not medical, legal, or professional advice, and not affiliated with the "
         "State of Connecticut.** Every result is a *lead to verify, not a conclusion.* Always confirm "
