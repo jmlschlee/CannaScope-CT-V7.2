@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Data-integrity regression for multi-product COA handling — the per-PDF block cache, ranked
-identifier matching, isolate-or-suppress, and source-audit block binding (cannascope_ct_v16_src).
+identifier matching, isolate-or-suppress, and source-audit block binding (cannascope_ct_v17_src).
 
 Proves the requirements:
   - a 10+ product COA returns ALL products, not just the first;
@@ -20,7 +20,7 @@ import tempfile
 import cannascope_multiproduct as mp
 import cannascope_ct_v4 as v4
 import cannascope_ct_v5 as v5
-import cannascope_ct_v16_src as cc
+import cannascope_ct_v17_src as cc
 
 # Isolate the multi-product cache to a temp file so the test never touches the real cache.
 cc.MULTIPRODUCT_PDF_CACHE = os.path.join(tempfile.gettempdir(), "_test_mp_cache.json")

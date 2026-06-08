@@ -607,8 +607,8 @@ def ocr_pdf(src, max_pages: int = 6, hard_cap: int = 40) -> str:
     if not backend:
         return ""
 
-    def _page_text(doc, i):
-        img = doc[i].render(scale=2.0).to_pil()
+    def _page_text(doc, i, scale):
+        img = doc[i].render(scale=scale).to_pil()
         if backend == "ocrmac":
             from ocrmac import ocrmac
             res = ocrmac.OCR(img).recognize()
@@ -616,15 +616,23 @@ def ocr_pdf(src, max_pages: int = 6, hard_cap: int = 40) -> str:
         import pytesseract
         return pytesseract.image_to_string(img.convert("L"))
 
+    # Escalating render DPI, UP TO 5 attempts (cross-platform "re-run OCR up to 5x" rule). The first pass
+    # at the normal scale is fast; only if a doc comes back EMPTY (an image-only COA whose small table text
+    # didn't resolve) do we retry at higher DPI. Only after all 5 attempts are empty do we give up (the
+    # caller then marks the field unread — never a fabricated value).
     with _PDF_LOCK:
-        try:
-            doc = pdfium.PdfDocument(src)
-            n = min(len(doc), max(max_pages, hard_cap))
-            out = [_page_text(doc, i) for i in range(n)]
-            doc.close()
-            return "\n".join(out)
-        except Exception:
-            return ""
+        for scale in (2.0, 2.6, 3.2, 4.0, 4.0):
+            try:
+                doc = pdfium.PdfDocument(src)
+                n = min(len(doc), max(max_pages, hard_cap))
+                out = [_page_text(doc, i, scale) for i in range(n)]
+                doc.close()
+                text = "\n".join(out)
+            except Exception:
+                text = ""
+            if text.strip():
+                return text
+        return ""
 
 
 # ----------------------------------------------------------------------------
@@ -960,6 +968,190 @@ def parse_columnar_micro(text: str, p: Product):
                            "unit": "CFU/g", "limit": CT_MICRO_LIMIT}
 
 
+# ============================================================================================
+# 2015-era columnar HEAVY METALS / MYCOTOXINS recovery  (Phase 8)
+# --------------------------------------------------------------------------------------------
+# NELabs (and similar) COAs print each analyte's label and value in SEPARATE columns; text/OCR
+# extraction then yields a block of LABELS followed (after a "Result Units" header) by a block of
+# VALUES. The generic label->inline-value parser can't read these (it extracted NOTHING on the real
+# 2015/2018 NELabs COAs), AND the OCR garbles the units — the values look like "<0.0005 Mg/kg BW/day",
+# "<0.002 kg/kg BW/day", "<5 4g/kg" (a mangled "µg/kg"). A WRONG heavy-metal / mycotoxin number is far
+# worse than a missing one, so this parser is deliberately conservative:
+#   * runs ONLY on the NELabs columnar layout, anchored on the panel header + "Result Units";
+#   * pairs label[i] with value[i] ONLY when the counts match exactly (never mis-pairs);
+#   * a "<x" token is recorded as a BELOW-DETECTION bound (a passing result) — the bound, not the
+#     garbled unit, is what matters, and a below-detect bound can never fire a contaminant FAIL, so
+#     unit garble like "4g/kg" is harmless (we keep the numeric bound "5", never the stray "4");
+#   * a BARE (non-"<") number is recorded ONLY when its unit validates as a real concentration unit
+#     AND the magnitude is physically plausible; otherwise the analyte is LEFT UNPARSED (skipped) —
+#     never guessed;
+#   * it never overwrites an analyte the generic parser already populated with a value.
+_METAL_COL_LABELS = [
+    ("arsenic",  re.compile(r"\barsenic\b", re.I)),
+    ("cadmium",  re.compile(r"\bcadmium\b", re.I)),
+    ("lead",     re.compile(r"\blead\b", re.I)),
+    ("mercury",  re.compile(r"\bmercury\b", re.I)),
+    ("chromium", re.compile(r"\bchromium\b", re.I)),
+]
+# Mycotoxin labels in document order: the 4 aflatoxin components, then ochratoxin (often a separate
+# mini-block). The combined "aflatoxin" total is derived afterward if all four components parse.
+_MYCO_COL_LABELS = [
+    ("afla_b1",    re.compile(r"aflatoxin\s*B\s*1\b", re.I)),
+    ("afla_b2",    re.compile(r"aflatoxin\s*B\s*2\b", re.I)),
+    ("afla_g1",    re.compile(r"aflatoxin\s*G\s*1\b", re.I)),
+    ("afla_g2",    re.compile(r"aflatoxin\s*G\s*2\b", re.I)),
+    ("ochratoxin", re.compile(r"ochratoxin", re.I)),
+]
+_COL_VAL_RE = re.compile(r"^\s*([<>≤≥]?)\s*(\d+(?:\.\d+)?)\s*(.*?)\s*$")
+_ND_RE = re.compile(r"^\s*(?:not\s+detected|nd|n\.?\s*d\.?|none\s+detected|absent|pass)\b", re.I)
+# A plausible concentration unit AFTER cleaning (spaces removed, µ->u). Garbled units like "4g/kg",
+# "kg/kg" deliberately FAIL this so a bare number carrying them is skipped, not emitted.
+_CONC_UNIT_OK = re.compile(r"^(?:m|u|n|p)?g/(?:kg|g|ml|l)(?:bw/day)?$")
+_METAL_NAMES = {"arsenic": "Arsenic", "cadmium": "Cadmium", "lead": "Lead",
+                "mercury": "Mercury", "chromium": "Chromium"}
+_MYCO_NAMES = {"afla_b1": "Aflatoxin B1", "afla_b2": "Aflatoxin B2", "afla_g1": "Aflatoxin G1",
+               "afla_g2": "Aflatoxin G2", "ochratoxin": "Ochratoxin A"}
+
+
+def _clean_unit(s):
+    return re.sub(r"\s+", "", (s or "").lower()).replace("µ", "u")
+
+
+def _is_conc_value_line(l):
+    """True only for lines that look like a real concentration RESULT (a below-detect bound, an ND/PASS
+    word, or a number carrying a concentration unit). Rejects dates ('12/12/2018'), page numbers, and
+    bare 'Limits' integers so the value block can't capture chrome."""
+    if _ND_RE.match(l):
+        return True
+    m = _COL_VAL_RE.match(l)
+    if not m:
+        return False
+    bd, _num, rest = m.group(1), m.group(2), m.group(3)
+    if bd in ("<", "≤"):          # NB: `bd in "<≤"` is True for bd=="" — must test explicit members
+        return True
+    # a bare number is a value ONLY if it carries a concentration-unit-ish token (has "g/kg" etc.)
+    return bool(re.search(r"[a-zµ]\s*g\s*/\s*(?:kg|g|ml|l)", rest, re.I))
+
+
+def _columnar_panel_pairs(lines, header_rx, label_specs):
+    """For a NELabs columnar panel: collect labels (in order, deduped) under `header_rx` up to the
+    'Result Units' marker, then the SAME number of value lines after it. Returns [(key, value_line)]
+    only when label-count == value-count (else [], never mis-paired). A panel header may appear more
+    than once (multi-product / multi-page); the FIRST well-formed panel wins."""
+    n = len(lines)
+    out = []
+    for hi in [i for i, l in enumerate(lines) if header_rx.search(l)]:
+        seq = []
+        ru = None
+        for i in range(hi + 1, min(hi + 40, n)):
+            l = lines[i]
+            if re.match(r"^\s*result\s+units?\b", l, re.I):
+                ru = i
+                break
+            if len(l) >= 60:                      # skip long narrative lines
+                continue
+            for key, rx in label_specs:
+                if key not in [k for k, _ in seq] and rx.search(l):
+                    seq.append((key, i))
+                    break
+        if not seq or ru is None:
+            continue
+        vals = []
+        for i in range(ru + 1, min(ru + 1 + 60, n)):
+            l = lines[i].strip()
+            if not l:
+                continue
+            if _is_conc_value_line(l):
+                vals.append(l)
+                if len(vals) >= len(seq):
+                    break
+            elif vals:                            # value block ended (e.g. PASS/PASS/limits column)
+                break
+            # else: leading chrome between "Result Units" and the values (e.g. a "Limits" header) — skip
+        if len(vals) == len(seq):
+            return [(seq[j][0], vals[j]) for j in range(len(seq))]
+    return out
+
+
+def _record_columnar_analyte(p, key, tok, name, default_unit, limit, max_plausible):
+    """Record ONE columnar safety-panel value defensively. Below-detect bound -> always safe; ND/PASS
+    -> ND; bare number -> only if unit valid + magnitude plausible, else SKIP (leave unparsed)."""
+    if key in p.analytes and p.analytes[key].get("value") is not None:
+        return                                    # never overwrite a real generic-parsed value
+    if _ND_RE.match(tok):
+        p.analytes[key] = {"raw": tok, "value": 0.0, "status": "ND", "name": name,
+                           "unit": default_unit, "limit": limit, "_below_detect": True}
+        return
+    m = _COL_VAL_RE.match(tok)
+    if not m:
+        return
+    bd, num, rest = m.group(1), m.group(2), m.group(3)
+    try:
+        val = float(num)
+    except ValueError:
+        return
+    cu = _clean_unit(rest)
+    unit = rest.strip() if _CONC_UNIT_OK.match(cu) else default_unit
+    if bd in ("<", "≤"):          # NB: `bd in "<≤"` is True for bd=="" — must test explicit members
+        # below-detection upper bound: PASSING, and immune to unit garble (we keep the bound, not the
+        # stray digits in a mangled unit). This is the common case on 2015 COAs.
+        p.analytes[key] = {"raw": tok, "value": val, "status": "ND", "name": name,
+                           "unit": unit, "limit": limit, "_below_detect": True}
+    else:
+        # a BARE measured number: emit ONLY if we trust the unit AND the magnitude; else skip entirely.
+        if _CONC_UNIT_OK.match(cu) and val < max_plausible:
+            p.analytes[key] = {"raw": tok, "value": val, "status": "", "name": name,
+                               "unit": rest.strip(), "limit": limit}
+        # else: deliberately leave UNPARSED — a wrong safety value is worse than a missing one.
+
+
+def parse_columnar_metals_myco(text, p):
+    """Recover HEAVY METALS (As/Cd/Pb/Hg/Cr) and MYCOTOXINS (aflatoxin B1/B2/G1/G2, ochratoxin) from
+    NELabs-style columnar COAs that the generic parser cannot read. Conservative + below-detect-aware
+    (see the block comment above). No-op on non-NELabs / non-columnar COAs."""
+    if not _NELABS_FORMAT.search(text):
+        return
+    if "result unit" not in text.lower():
+        return
+    lines = [l.rstrip() for l in text.splitlines()]
+
+    for key, tok in _columnar_panel_pairs(lines, re.compile(r"heavy\s+metals?", re.I), _METAL_COL_LABELS):
+        _record_columnar_analyte(p, key, tok, _METAL_NAMES[key], "mg/kg", None, 1000.0)
+
+    # Mycotoxins: the aflatoxin components (B1/B2/G1/G2) sit under the MYCOTOXINS header; ochratoxin is
+    # frequently a separate one-row block, so parse it on its own too.
+    myco_hdr = re.compile(r"mycotoxins?", re.I)
+    for key, tok in _columnar_panel_pairs(lines, myco_hdr,
+                                          [s for s in _MYCO_COL_LABELS if s[0] != "ochratoxin"]):
+        _record_columnar_analyte(p, key, tok, _MYCO_NAMES[key], "ug/kg", MYCOTOXIN_LIMIT, 100000.0)
+    if "ochratoxin" not in p.analytes:
+        # Ochratoxin is usually a one-row block with NO "Result Units" header (e.g. "Ochratoxin-A" then
+        # "<5 ug/kg" on the next line). Take the first concentration value within a few lines below the
+        # label; stop at the first non-empty non-value line so we never wander into another analyte.
+        for i, l in enumerate(lines):
+            if not re.search(r"ochratoxin", l, re.I):
+                continue
+            for j in range(i + 1, min(i + 5, len(lines))):
+                s = lines[j].strip()
+                if not s:
+                    continue
+                if _is_conc_value_line(s):
+                    _record_columnar_analyte(p, "ochratoxin", s, _MYCO_NAMES["ochratoxin"],
+                                             "ug/kg", MYCOTOXIN_LIMIT, 100000.0)
+                break   # first non-empty line decides (value -> recorded; otherwise stop)
+            if "ochratoxin" in p.analytes:
+                break
+    # Derive a combined "Total Aflatoxins" ONLY when all four components are below-detection (then the
+    # total is unambiguously below-detect too); never sum garbled numerics into a fabricated total.
+    comps = [p.analytes.get(k) for k in MYCO_COMP_KEYS]
+    if comps and all(c is not None for c in comps) and all(c.get("_below_detect") for c in comps) \
+            and "aflatoxin" not in p.analytes:
+        worst = max((c.get("value") or 0.0) for c in comps)
+        p.analytes["aflatoxin"] = {"raw": "< (all components below detection)", "value": worst,
+                                   "status": "ND", "name": "Total Aflatoxins", "unit": "ug/kg",
+                                   "limit": MYCOTOXIN_LIMIT, "_below_detect": True}
+
+
 # AltaSci / USP COAs report microbial DETECTION LIMITS as powers of ten (10^2..10^6,
 # e.g. "Total Yeast & Mold Count < 10^4 CFU/g Passed"). PDF text extraction drops the
 # superscript so "< 10^6" flattens to "< 106" -- which the generic parser would read
@@ -1023,6 +1215,7 @@ def parse_analytes(text: str, p: Product):
 
     parse_mycotoxins(text, p)
     parse_columnar_micro(text, p)   # recover NELabs columnar yeast&mold / aerobic
+    parse_columnar_metals_myco(text, p)   # Phase 8: recover NELabs columnar heavy metals + mycotoxins
     fix_usp_micro_powers(text, p)    # restore AltaSci/USP "< 10^X" detection limits
 
     # Plausibility guard: a CFU/g microbial count physically cannot approach 1e11 (a gram of pure
@@ -1254,7 +1447,10 @@ def apply_flags(p: Product, text: str, watch: int):
                            f"Connecticut Legal Limit {tlim:,.0f})")
 
     # 6. Remediation signature: low/ND yeast&mold yet a mycotoxin detectable
-    myco_hit = any(a.get(k) and a[k].get("value") and a[k]["value"] > 0
+    # A BELOW-DETECTION mycotoxin ("<5 ug/kg") is NOT detectable — its stored value is the detection
+    # bound, not a measured amount — so it must NOT trip this flag (a wrong safety flag is worse than
+    # none, and the 2015 columnar reader emits mycotoxins only as below-detect bounds).
+    myco_hit = any(a.get(k) and a[k].get("value") and a[k]["value"] > 0 and not _is_below_detect(a[k])
                    for k in ["aflatoxin", "ochratoxin"] + MYCO_COMP_KEYS)
     if (is_flower(p) and tymc and tymc.get("value") is not None and not _is_below_detect(tymc)
             and tymc["value"] <= watch and myco_hit):

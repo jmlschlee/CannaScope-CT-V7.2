@@ -2,7 +2,7 @@
 
 **Source-verified transparency reports for Connecticut cannabis — built so every number can be traced back to the product's own Certificate of Analysis (COA).**
 
-🔗 **Live web app:** [cannascope-ct.streamlit.app](https://cannascope-ct.streamlit.app) &nbsp;·&nbsp; 💻 **Desktop download:** see [Releases](../../releases) &nbsp;·&nbsp; **Current version: V16.3.8**
+🔗 **Live web app:** [cannascope-ct.streamlit.app](https://cannascope-ct.streamlit.app) &nbsp;·&nbsp; 💻 **Desktop download:** see [Releases](../../releases) &nbsp;·&nbsp; **Current version: V17.0.0**
 
 ---
 
@@ -38,6 +38,9 @@ If you are making a health, legal, or compliance decision, verify independently 
 - 🧬 **Multi-product COA handling** — some COA PDFs contain several products. CannaScope isolates **each product's own block** and will **never** attribute one product's results to another; if it can't be sure which product a value belongs to, it routes the record to review instead of guessing.
 - 📅 **Date-window integrity** *(new in V16.3.8)* — a statewide report contains **only** records whose COA test date falls inside the requested window; the run shows the exact window applied and **stops rather than publish** anything outside it.
 - 🧯 **Conservative by design** — when extraction is uncertain (e.g. a scanned/low-quality COA), the value is **held for manual review**, not published.
+- 🔁 **Live always wins** *(new in V17.0.0)* — the cache only makes runs faster; it is **never** trusted blindly. Every online run **spot-checks the cache against the live COA at its source link** and re-pulls fresh whenever a row is empty, garbled, or implausible. If live and cache disagree, **live wins** and the cache is corrected.
+- 🔬 **Reads 5×, never guesses** *(new in V17.0.0)* — image-only COAs are OCR'd up to **5 escalating attempts**; a value is left "unable to read" only after honest retries — a confidently-wrong safety number is never emitted.
+- 🖥️ **Cross-platform** *(new in V17.0.0)* — identical behavior on macOS, Windows, and Linux.
 - 🧫 **Below-detection aware** — "less-than" detection limits (e.g. `<10,000 CFU/g`) are treated as bounds, not as failing measurements.
 
 ### 📚 Regulatory context

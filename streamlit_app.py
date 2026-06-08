@@ -1,8 +1,8 @@
 """
-CannaScope CT V16.0.0 — Streamlit front end (consumer-friendly).
+CannaScope CT V17.0.0 — Streamlit front end (consumer-friendly).
 
 Drives the REAL current program (auto-detected) to generate a PDF, served via st.download_button.
-ADAPTIVE: if the triple-verified COA cache is available (the self-contained CannaScope_CT_V16.py, or a
+ADAPTIVE: if the triple-verified COA cache is available (the self-contained CannaScope_CT_V17.py, or a
 local COA Data Cache.csv), the app runs FULL reports straight from the cache (fast, no per-product cap).
 Otherwise it runs a small, capped LIVE sample so a public click stays fast on the free hosting tier.
 Product search reads the CT registry (cached). Friendly errors, no stack traces. Advisory wording.
@@ -23,9 +23,9 @@ st.set_page_config(page_title="CannaScope CT", page_icon="🌿", layout="centere
                    initial_sidebar_state="collapsed")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Prefer the self-contained V16 (it embeds the triple-verified cache + auto-seeds it) so the web app
+# Prefer the self-contained V17 (it embeds the triple-verified cache + auto-seeds it) so the web app
 # can run full, fast reports; fall back to the modular source.
-_CANDIDATES = ["CannaScope_CT_V16.py", "cannascope_ct_v16_src.py", "CannaScope_CT_V15.py"]
+_CANDIDATES = ["CannaScope_CT_V17.py", "cannascope_ct_v17_src.py", "CannaScope_CT_V16.py", "cannascope_ct_v16_src.py"]
 SCRIPT = next((c for c in _CANDIDATES if os.path.exists(os.path.join(HERE, c))), None)
 
 
@@ -33,7 +33,7 @@ SCRIPT = next((c for c in _CANDIDATES if os.path.exists(os.path.join(HERE, c))),
 def app_version():
     """The REAL program version, read from the shipped code so the UI badge can never drift from the
     actual build. Prefers the small lean source; falls back to scanning the self-contained."""
-    for cand in ("cannascope_ct_v16_src.py", SCRIPT or ""):
+    for cand in ("cannascope_ct_v17_src.py", "cannascope_ct_v16_src.py", SCRIPT or ""):
         p = os.path.join(HERE, cand)
         if cand and os.path.exists(p):
             try:
@@ -46,14 +46,14 @@ def app_version():
     return ""
 
 
-STATEWIDE_DIR = "CannaScope CT V16 - Statewide Transparency Reports"
+STATEWIDE_DIR = "CannaScope CT V17 - Statewide Transparency Reports"
 CONSUMER_DIR = os.path.join("output", "consumer_concerns")
 LOCAL_REGISTRY = os.path.join(HERE, STATEWIDE_DIR, "Registry Cache.csv")
 LOCAL_COA_CACHE = os.path.join(HERE, STATEWIDE_DIR, "COA Data Cache.csv")
 REGISTRY_URL = "https://data.ct.gov/resource/egd5-wb6r.csv?$limit=40000"
 RUN_TIMEOUT = 600
 # Cache available if the self-contained (with embedded cache) is the program, or a cache CSV exists.
-CACHE_READY = bool(SCRIPT and "V16" in SCRIPT) or os.path.exists(LOCAL_COA_CACHE)
+CACHE_READY = bool(SCRIPT and ("V17" in SCRIPT or "V16" in SCRIPT)) or os.path.exists(LOCAL_COA_CACHE)
 SAMPLE_CAP = 150          # live-mode product cap (only used when CACHE_READY is False)
 MAX_DAYS = 365 if CACHE_READY else 365
 
@@ -251,7 +251,7 @@ def offer_pdf(pdf, label):
 
 
 # ---------------------------------------------------------------- header
-st.markdown(f'# 🌿 CannaScope CT <span class="cs-badge">V{app_version() or "16"}</span>',
+st.markdown(f'# 🌿 CannaScope CT <span class="cs-badge">V{app_version() or "17"}</span>',
             unsafe_allow_html=True)
 st.caption("Source-verified Connecticut cannabis transparency reports · 33,000+ triple-verified COAs")
 st.info("**Advisory tool — not medical, legal, or professional advice, and not affiliated with the "

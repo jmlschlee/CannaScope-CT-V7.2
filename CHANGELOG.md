@@ -2,7 +2,30 @@
 
 All notable changes to this project are documented here.
 
-## [16.3.8] — 2026-06-06 — CannaScope CT V16.3.8 — current release
+## V17.0.0 — current release
+
+**SUPERIOR RULE — active cache self-audit (cache is a hint, live is the authority).** Every online,
+cache-backed run now stride-samples cached COAs, re-pulls them LIVE from their source links, and compares
+to the cache. Live always wins: disagreeing rows are corrected to live, the audit widens on disagreement,
+and a genuine value conflict distrusts the cache for the whole window (full live re-pull). Offline runs
+disclose "cache UNVERIFIED". Flags `--cache-audit-sample N` / `--full-cache-audit` / `--no-cache-audit`;
+debug keys `cache_audit_*`. Verified live (12/12 agreed) + a real corruption demo (faked cache value caught
+vs live, corrected, distrusted).
+
+**Cross-platform acceptance criteria (every run, every OS).** Cross-platform OCR (ocrmac/Tesseract) and
+per-OS OCR process groups; "when in doubt, go live" on empty OR implausible cached rows; OCR retried up to
+5× (escalating DPI) before a field is marked unread — never fabricated; a units/ranges plausibility
+cross-check gates implausible values out of publication; an empty report fails loud (`sys.exit 3`);
+out-of-range data fails loud (`sys.exit 2`).
+
+**Reconciled from 16.3.x:** online-OCR fallback in the report path; 2015 columnar metals/mycotoxin parser
+(defensive, below-detect, garble-proof); persisted training ledger + diagnose-learning + training→report
+traceability; `--forensic-no-cache`; honest category-level coverage accounting; multi-product block-binding
+map; validation messaging derived from the worst readiness state; evidence-gated learning recommendation
+(TRAINING STAGNATION DETECTED). Source renamed `cannascope_ct_v16_src.py` → `cannascope_ct_v17_src.py`;
+builder `_make_v17.py`; program `CannaScope_CT_V17.py`. Additive — all prior releases preserved.
+
+## [16.3.8] — 2026-06-06 — CannaScope CT V16.3.8 
 
 Date-window integrity + independent live end-to-end verification + hosted-app contrast fix. Informational
 tool; results are leads to verify against the official COA, not conclusions. `ANALYSIS_VERSION` → 16.3.8.
