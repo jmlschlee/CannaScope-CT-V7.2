@@ -474,14 +474,23 @@ def cache_path(p: Product) -> str:
     return os.path.join(CACHE_DIR, f"{coa_key(p)}.pdf")
 
 
+# When True, download_pdf ALWAYS fetches from the live source link this run, even if a local cached PDF
+# exists — so `--live-verify` can guarantee genuine live verification (every COA re-read from source).
+FORCE_LIVE_DOWNLOAD = False
+
+
 def download_pdf(p: Product, session: requests.Session) -> Optional[str]:
     """Fetch the COA and write it to the cache path so it can be parsed. (pdfium
     is not thread-safe parsing from memory buffers, so a real file is required.)
     Clean COAs are deleted again right after evaluation, so only flagged COAs
-    ever persist. A previously-cached flagged COA is reused, not re-downloaded."""
+    ever persist. A previously-cached flagged COA is reused, not re-downloaded
+    (unless FORCE_LIVE_DOWNLOAD). Sets `p._coa_fetched_live` = True ONLY when this
+    call actually hit the network this run (the honest 'verified live this run'
+    signal); False when a local cached PDF was reused."""
     path = cache_path(p)
-    if os.path.exists(path) and os.path.getsize(path) > 1000:
-        return path
+    p._coa_fetched_live = False
+    if not FORCE_LIVE_DOWNLOAD and os.path.exists(path) and os.path.getsize(path) > 1000:
+        return path                     # reused local PDF — NOT a live read this run
     os.makedirs(CACHE_DIR, exist_ok=True)
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -496,6 +505,7 @@ def download_pdf(p: Product, session: requests.Session) -> Optional[str]:
                 return None
             with open(path, "wb") as f:
                 f.write(r.content)
+            p._coa_fetched_live = True   # genuine live fetch from the source link this run
             return path
         except Exception as e:
             p.parse_note = f"download error (attempt {attempt}): {e}"

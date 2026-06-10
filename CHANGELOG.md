@@ -2,7 +2,36 @@
 
 All notable changes to this project are documented here.
 
-## V17.1.0 — current release
+## V17.1.1 — current release
+
+Honesty + readability + added-analysis update. No measurement, threshold, limit, or finding logic changed
+(ANALYSIS_VERSION stays 17.0.0).
+
+**Honest live-verification coverage (gate).** Genuine live COA downloads are now correctly credited as live
+verification (the ledger path previously didn't set the live marker, so a real online run could show a
+misleading "0% verified live"). The tier now gates on *products verified live this run*: a run with zero
+live verification is stamped `CACHE-REPLAY — NOT LIVE-VERIFIED THIS RUN` (online) / `UNVALIDATED — CACHE
+REPLAY` (offline) and no finding is presented as live-verified — incidental OCR can no longer exempt a
+replay. Counters reconciled ("Live URL Verifications" relabeled; a true "COAs re-fetched LIVE this run"
+added). New `--live-verify` switch forces a fresh live re-fetch of every COA; the run log states
+`LIVE VERIFICATION: ON/OFF`.
+
+**New "Convenient Lab Result Groupings by Producer and Lab"** statistical screen — boundary clustering just
+below a pass/fail limit, by producer+lab+analyte (binomial / z-score / chi-square GOF / Fisher exact /
+cliff-effect / 0–100 Convenience Score), with a plain-English column legend, public Top-10 summary, full
+statistical appendix, and CSV. Review signal only, never a fraud claim.
+
+**Renamed:** "Potency Parser Conflicts" / "Impossible Cannabinoid Math" → "Laboratory Data Consistency
+Flags"; "High THC Flower Review" → "Biologically Implausible High THC Flower Review."
+
+**Readability:** decluttered cover (status + counts + one warning + one pointer; detail moved to the
+appendix); centered + larger "Most Important Findings", "Statewide Snapshot", "How To Read"; ranked,
+tier-banded "Flagged Findings by Producer" (≥20% / 10–20% / <10%, rule printed); pathogen findings sorted
+newest→oldest; section headers never orphan from their tables; front technical summary compressed to two
+lines. Added a Coverage Integrity Summary (expected/acquired/parsed/live-verified, fail-loud reconciliation).
+Embedded Unicode font so µg/kg renders in every viewer; removed missing-glyph (tofu) icons.
+
+## V17.1.0 
 
 **NEW — "Convenient Lab Result Groupings by Producer and Lab."** A boundary-clustering statistical
 screen that flags statistically unusual clustering of quantitative results just BELOW a pass/fail

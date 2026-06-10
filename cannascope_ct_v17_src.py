@@ -78,11 +78,11 @@ ProductV5 = v5.ProductV5
 # Config
 # ============================================================================
 # Version label shown on the report cover, in output filenames, and in the footer.
-APP_NAME = "CannaScope CT V17.1.0"
+APP_NAME = "CannaScope CT V17.1.1"
 # Software version as it appears in the report FILENAME standard, e.g. "13" -> "...-V15-...".
 # Bump this (and APP_NAME) on a version change; the report-number sequence keeps going (global,
 # continuous, never resets) and filenames simply carry the new version token.
-SOFTWARE_VERSION = "17.1.0"
+SOFTWARE_VERSION = "17.1.1"
 FILE_VERSION_TAG = f"V{SOFTWARE_VERSION}"
 # Single source of truth for the actual shipped single-file name (major version only), used in EVERY
 # rendered/printed recommendation and disclaimer so the report never names a stale script (P4 fix).
@@ -3975,7 +3975,8 @@ def _provenance_self_checks(debug):
         out.append(dict(issue=issue, count=(1 if bad else 0), status=("REMAINS" if bad else "None")))
     cas = str(debug.get("cache_audit_status", "") or "")
     online = not cas.startswith("skipped")
-    replay = "CACHE REPLAY" in str(debug.get("status_tier", "") or "")
+    replay = bool(debug.get("cache_replay")) or "CACHE REPLAY" in str(debug.get("status_tier", "") or "") \
+        or "CACHE-REPLAY" in str(debug.get("status_tier", "") or "")
     vc = debug.get("validation_coverage_pct", 0.0) or 0.0
     reval = int(debug.get("products_revalidated_live", 0) or 0)
     reviewed = int(debug.get("products_reviewed", 0) or 0)
@@ -4643,6 +4644,10 @@ def build_pdf(out_path, report_no, ctx):
     SUMM = ParagraphStyle("summ", parent=body_st, fontSize=10, leading=14.5,
                           textColor=colors.HexColor("#1F2D3D"), backColor=colors.HexColor("#eef2f5"),
                           borderPadding=8, spaceBefore=14, spaceAfter=14)
+    # TASK 3/4/5 — centered + larger + more leading for the headline findings blocks (Most Important
+    # Findings, Statewide Snapshot, How To Read). Centered text with hanging "• " bullets looks broken, so
+    # callers join these with <br/><br/> (no bullet glyphs) — clean centered statement lines.
+    SUMM_CTR = ParagraphStyle("summc", parent=SUMM, fontSize=12.5, leading=18.5, alignment=1)
     TREND = ParagraphStyle("trend", parent=CTX, alignment=0, fontSize=9.5, leading=12.5,
                            textColor=colors.HexColor("#33474f"), spaceBefore=1, spaceAfter=9)
 
@@ -4692,16 +4697,25 @@ def build_pdf(out_path, report_no, ctx):
     _au0 = ctx.get("cov_audit") or {}
     _cov_lines = [f"&#8226; {esc(r)}" for r in (_au0.get("failure_highlights") or [])][:6]
     _warn_lines = [f"&#8226; {esc(r)}" for r in _wr]
-    _is_cache_replay = bool(_au0.get("cache_replay")) or "CACHE REPLAY" in _su
+    _is_cache_replay = bool(_au0.get("cache_replay")) or "CACHE REPLAY" in _su or "CACHE-REPLAY" in _su
     if _is_cache_replay:
         # PROVENANCE banner — most prominent. A cache replay must never read as a validated report.
+        # Run-aware: OFFLINE (couldn't reach live) vs ONLINE-but-0-live-verified (reused cache/local PDFs).
         _bx = "#fbe3e1"; _bd = "#C0392B"
-        _hdr = ("UNVALIDATED &mdash; CACHE REPLAY. This is a diagnostic report and NO live verification ran "
-                "this run: the findings shown are <b>carried from prior verification</b> and were NOT re-checked "
-                "against the live source COA this run. Anything that could not be verified was <b>excluded, not "
-                "estimated</b>, so a missing finding does NOT mean a product passed. Re-run online (omit "
-                "--offline), or with --validate, for a live-verified report &mdash; full detail is in the "
-                "Technical Validation &amp; Diagnostics appendix.")
+        _replay_offline = "CACHE-REPLAY" not in _su   # offline tier = "UNVALIDATED — CACHE REPLAY" (space)
+        if _replay_offline:
+            _hdr = ("UNVALIDATED &mdash; CACHE REPLAY. This run was OFFLINE and NO live verification ran: the "
+                    "findings shown are <b>matched against the cached COA, NOT re-verified live this run</b>. "
+                    "Anything that could not be verified was <b>excluded, not estimated</b>, so a missing "
+                    "finding does NOT mean a product passed. Re-run ONLINE (omit --offline), or with --validate, "
+                    "for a live-verified report &mdash; full detail is in the Technical Validation appendix.")
+        else:
+            _hdr = ("CACHE-REPLAY &mdash; NOT LIVE-VERIFIED THIS RUN. 0 of the reviewed products were re-verified "
+                    "against their <b>live source COA</b> this run (served from cache / reused local PDFs). The "
+                    "findings shown are <b>matched against the cached COA, NOT re-verified live this run</b>. "
+                    "Anything that could not be verified was <b>excluded, not estimated</b>, so a missing finding "
+                    "does NOT mean a product passed. Re-run with <b>--live-verify</b> (or --validate) to verify "
+                    "against the live source &mdash; full detail is in the Technical Validation appendix.")
         _lines = (_cov_lines + _warn_lines) or ["&#8226; (see the limitations below)"]
     elif _is_fail:
         _bx = "#fbe3e1"; _bd = "#C0392B"
@@ -4752,35 +4766,55 @@ def build_pdf(out_path, report_no, ctx):
     _valbox = [KeepTogether([Paragraph(f'<font color="{_bd}"><b>{_hdr}</b></font>'
                              + _cover_detail + _cover_pointer, _valstyle)])]
 
+    # TASK 2 — DECLUTTERED COVER. The cover holds ONLY: title/meta, the one-line status tier, the headline
+    # counts, ONE short warning line, and ONE pointer to the appendix. Everything else (the diagnostic
+    # banner, the validation-coverage counters, the "Why NOT READY" box, the severity-legend explanation,
+    # and the Testing Date / CT % / CannaScope Limit definitions) is COLLECTED into `_cover_detail` and
+    # rendered in the Technical Validation & Diagnostics appendix (nothing deleted, just relocated).
     story += [
-        Paragraph(APP_NAME, title_st),                                   # CannaScope CT V15
+        Paragraph(APP_NAME, title_st),
         Spacer(1, 5),
         Paragraph(esc(REPORT_TITLE), sub_st),
         Spacer(1, 2),
         Paragraph(esc(REPORT_SUBTITLE), ParagraphStyle("sub2", parent=sub_st, fontSize=11)),
         Spacer(1, 11),
-        Paragraph(f"Report #{report_no}", bigmeta),                      # Report #15
-        Paragraph("Statewide Report", bigmeta),                          # Statewide Report
-        Paragraph(f"Created {esc(cover_date)}", meta_st),                # Created June 3, 2026
-        Paragraph(esc(cover_time), meta_st),                             # 5:36 PM EDT
-        Spacer(1, 5),
-        Paragraph(f"Validation status: <font color=\"{scol}\"><b>{esc(status)}</b></font> "
-                  f"&nbsp;|&nbsp; Dataset window: {esc(window)}", note_st),
-        *_valbox,
+        Paragraph(f"Report #{report_no}", bigmeta),
+        Paragraph("Statewide Report", bigmeta),
+        Paragraph(f"Created {esc(cover_date)}", meta_st),
+        Paragraph(esc(cover_time), meta_st),
         Spacer(1, 8),
-        Paragraph(f"<b>{esc(FRAMING)}</b>", ParagraphStyle("fr", parent=note_st, fontSize=10.5, leading=14.5,
-                  textColor=NAVY, backColor=colors.HexColor("#eef2f5"), borderPadding=8)),
-        Spacer(1, 13),
-        # "published findings" (run-neutral, honest): they are PUBLISHED, but only a fraction were
-        # re-verified against the LIVE source COA this run — the validation-coverage box below gives that
-        # count. On a cache-replay run, say so plainly here so nothing reads as "validated this run."
+        Paragraph(f"Status: <font color=\"{scol}\"><b>{esc(status)}</b></font> &nbsp;|&nbsp; "
+                  f"Dataset window: {esc(window)}",
+                  ParagraphStyle("covstatus", parent=note_st, fontSize=11, leading=15)),
+        Spacer(1, 12),
         Paragraph(f"<b>{ctx['n_reviewed']:,}</b> products in window &nbsp;•&nbsp; <b>{ctx['n_pub']:,}</b> published findings"
                   f"{' (carried from prior verification — 0 re-verified live this run)' if _is_cache_replay else ''} &nbsp;•&nbsp; "
                   f'<font color="#C0392B"><b>{ctx["n_red"]} Do Not Consume</b></font> &nbsp;•&nbsp; '
                   f'<font color="#E67E22"><b>{ctx["n_org"]} High Caution</b></font> &nbsp;•&nbsp; '
                   f'<font color="#9A7B0A"><b>{ctx["n_yel"]} Moderate Caution</b></font> &nbsp;•&nbsp; '
                   f'<font color="#0E6B5A"><b>{ctx["n_aqua"]} High Cannabinoid</b></font>', meta_st),
-        Spacer(1, 7),
+        Spacer(1, 12),
+        Paragraph("<b>Every flag is a lead, not a conclusion. Absence of a finding is not proof a product is "
+                  "clean. Verify against the live COA.</b>",
+                  ParagraphStyle("covwarn", parent=note_st, fontSize=10.5, leading=14.5, textColor=NAVY,
+                                 backColor=colors.HexColor("#eef2f5"), borderPadding=7)),
+        Spacer(1, 8),
+        Paragraph("<i>Full coverage limits, validation counters, and definitions are in the Technical "
+                  "Validation &amp; Diagnostics appendix.</i>",
+                  ParagraphStyle("covptr", parent=note_st, fontSize=9.5, leading=12)),
+        Spacer(1, 16),
+    ]
+
+    # Detail relocated off the cover → rendered in the appendix (Task 2).
+    _cover_detail = [
+        Paragraph("Cover Detail — Status Banner, Validation Counters &amp; Definitions", miniH),
+        Paragraph(f"Validation status: <font color=\"{scol}\"><b>{esc(status)}</b></font> &nbsp;|&nbsp; "
+                  f"Dataset window: {esc(window)}", note_st),
+    ] + list(_valbox) + [
+        Spacer(1, 6),
+        Paragraph(f"<b>{esc(FRAMING)}</b>", ParagraphStyle("fr", parent=note_st, fontSize=10.5, leading=14.5,
+                  alignment=0, textColor=NAVY, backColor=colors.HexColor("#eef2f5"), borderPadding=8)),
+        Spacer(1, 8),
         Paragraph(
             (lambda _d: f'<b>Validation coverage:</b> <b>{_d.get("products_live_verified_this_run", 0):,}</b> of '
              f'{_d.get("products_reviewed", 0):,} reviewed <b>verified live this run</b> '
@@ -4791,13 +4825,11 @@ def build_pdf(out_path, report_no, ctx):
              "(cache-served / unreadable) &nbsp;•&nbsp; "
              f'fresh OCR {_d.get("ocr_runs_fresh", 0):,}. &nbsp;"Reviewed" counts cache rehydrates and is NOT a '
              "validation count.")(ctx.get("debug") or {}),
-            ParagraphStyle("vcov", parent=note_st, fontSize=9, leading=12,
+            ParagraphStyle("vcov", parent=note_st, fontSize=9, leading=12, alignment=0,
                            textColor=colors.HexColor("#14321f"), backColor=colors.HexColor("#eef6ee"),
                            borderColor=colors.HexColor("#1E7E34"), borderWidth=0.6, borderPadding=6)),
         Spacer(1, 9),
-        # FIX E — explain NOT READY next to a live verification %, WITHOUT changing readiness logic.
-        # Only shown on a NOT-READY run (an offline NOT-READY run routes to the cache-replay branch instead).
-        *([Paragraph(
+    ] + ([Paragraph(
             "<b>Why does this say NOT READY even though findings were verified this run?</b> "
             "NOT READY reflects <b>year-level COA-format training / fingerprint coverage</b> — how completely "
             "the parser has learned that year's lab layouts — which is <b>separate from this run's per-COA "
@@ -4807,14 +4839,13 @@ def build_pdf(out_path, report_no, ctx):
             ParagraphStyle("notready", parent=note_st, fontSize=8.5, leading=11.5, alignment=0,
                            textColor=colors.HexColor("#5b4a16"), backColor=colors.HexColor("#fbf6e6"),
                            borderColor=colors.HexColor("#e4d9a8"), borderWidth=0.6, borderPadding=6)),
-           Spacer(1, 7)] if _is_not_ready else []),
+          Spacer(1, 7)] if _is_not_ready else []) + [
         Paragraph("<b>Contamination severity (per measurement):</b> &nbsp; "
                   '<font color="#C0392B"><b>RED = Near / over CT limit</b></font> &nbsp; '
                   '<font color="#E67E22"><b>ORANGE = Elevated</b></font> &nbsp; '
                   '<font color="#9A7B0A"><b>YELLOW = Above CannaScope threshold</b></font> &nbsp; '
                   '<font color="#1E7E34"><b>GREEN = Below threshold</b></font>', note_st),
         Spacer(1, 5),
-        # Reconcile the four severity tiers with the total so every validated finding is accounted for.
         Paragraph(
             (lambda red, org, yel, aqua, thc, pub:
              f"<i>Every published finding is assigned exactly one severity, so the four above sum to the total: "
@@ -4822,16 +4853,16 @@ def build_pdf(out_path, report_no, ctx):
              + ("" if (red+org+yel+aqua) == pub else f" (+{pub-(red+org+yel+aqua):,} other)")
              + f". <b>High Cannabinoid</b> = the {aqua:,} products with an abnormal/high-cannabinoid flag "
              "(includes flower, extracts and concentrates) — a real severity assignment, not a balancing "
-             f"figure. Of those, the <b>High-THC Flower Review</b> section lists the {thc:,} curated "
-             "non-infused-flower-over-35% cases (a stricter subset, not a separate total).</i>")(
+             f"figure. Of those, the <b>Biologically Implausible High THC Flower Review</b> section lists the "
+             f"{thc:,} curated non-infused-flower-over-35% cases (a stricter subset, not a separate total).</i>")(
                 ctx["n_red"], ctx["n_org"], ctx["n_yel"], ctx["n_aqua"], ctx["n_thc"], ctx["n_pub"]),
-            ParagraphStyle("tierrec", parent=note_st, fontSize=8.5, leading=11.5)),
+            ParagraphStyle("tierrec", parent=note_st, fontSize=8.5, leading=11.5, alignment=0)),
         Spacer(1, 8),
         Paragraph("<b>Testing Date</b> is the COA's test / sample date (never the report-generation date). "
                   "<b>CT % Of Limit</b> = measured ÷ Connecticut legal limit × 100. <b>CannaScope Limit</b> is the "
                   "stricter consumer-awareness threshold (Yeast &amp; Mold / Aerobic = 10,000 CFU/g; other "
                   "contaminants = 50% of the CT limit). Every COA number is a clickable link.", note_st),
-        Spacer(1, 16),
+        Spacer(1, 10),
     ]
 
     # ---------------- EXECUTIVE SUMMARY (dashboard) ----------------
@@ -4842,33 +4873,40 @@ def build_pdf(out_path, report_no, ctx):
                      [[f"{ctx['n_reviewed']:,}", f"{ctx['n_pub']:,}", str(ctx["n_red"]), str(ctx["n_org"]),
                        str(ctx["n_yel"]), str(ctx["n_aqua"])]], [1.6*inch]*6))
     story.append(Spacer(1, 5))
-    # Honest dataset accounting — keeps the denominators clear (no "829 reviewed / 793 findings" confusion).
-    # FIX C/D: show the THREE reconciling buckets (scanned + reused + excluded == window) so the excluded
-    # records are visible, and use ONE consistent "this-run scanned" figure everywhere.
+    # TASK 6 — front technical summary compressed to <=2 short lines. The FULL dataset accounting, the
+    # Coverage Integrity Summary, and the coverage/software limitations breakdown are relocated to the
+    # Technical Validation & Diagnostics appendix (the dataset accounting is appended to `_cover_detail`).
     story.append(Paragraph(
-        (lambda win, scan, reu, exc: (
-            f"<b>Dataset accounting:</b> {win:,} products in the selected window = "
-            f"{scan:,} " + ("re-processed from cache this run (read from cached COA copies, NOT freshly "
-            "fetched live — the same records the validation box counts as 'not verified live')"
-            if _is_cache_replay else "freshly scanned (read live) this run")
-            + f" + {reu:,} reused from the verified-clean ledger (skipped, known-clean) + {exc:,} excluded "
-            f"(out-of-window {acct.get('excluded_out_of_window',0):,}; no confirmable date "
-            f"{acct.get('excluded_no_date',0):,}). "
-            + ("Buckets reconcile to the window total. " if (scan + reu + exc) == win
-               else f"(buckets sum to {scan+reu+exc:,}, expected {win:,}.) ")
-            + f"<b>{acct.get('published_findings', ctx['n_pub']):,} published findings</b>. Percentages below "
-            "use the window total as the denominator."))(
-            acct.get('window', ctx['n_reviewed']), acct.get('scanned_this_run', 0),
-            acct.get('reused_from_ledger', 0), acct.get('excluded', 0)),
-        TREND))
-    # One-line pointer to the validation-limits material (Part B item 5) — keeps the exec summary clean.
-    story.append(Paragraph(
-        "<i>The <b>Coverage Integrity Summary</b> (COAs expected / acquired / parsed / live-verified, with "
-        "acquisition, parse and verification rates) is in the Technical Validation &amp; Diagnostics appendix. "
-        "Full validation limits and coverage gaps (unreadable / unvalidated COAs, untrained years, excluded "
-        "rows) are documented in the <b>Coverage Gaps / Unvalidated COAs</b> and <b>Software Self-Enhancement &amp; "
-        "Self-Audit</b> sections near the end.</i>", TREND))
+        f"<b>{acct.get('window', ctx['n_reviewed']):,}</b> products in the selected window &nbsp;•&nbsp; "
+        f"<b>{acct.get('published_findings', ctx['n_pub']):,}</b> published findings. <i>Absence of a finding is "
+        "not proof a product is clean — the full dataset accounting, coverage-integrity ratios, and "
+        "coverage/software limitations are in the Technical Validation &amp; Diagnostics appendix.</i>", TREND))
     story.append(Spacer(1, 9))
+    # Full dataset accounting → relocated to the appendix (with the other cover detail).
+    _cover_detail += [
+        Spacer(1, 8),
+        Paragraph("Dataset Accounting (full)", miniH),
+        Paragraph(
+            (lambda win, scan, reu, exc: (
+                f"<b>Dataset accounting:</b> {win:,} products in the selected window = "
+                f"{scan:,} " + ("re-processed from cache this run (read from cached COA copies, NOT freshly "
+                "fetched live — the same records the validation box counts as 'not verified live')"
+                if _is_cache_replay else "freshly scanned (read live) this run")
+                + f" + {reu:,} reused from the verified-clean ledger (skipped, known-clean) + {exc:,} excluded "
+                f"(out-of-window {acct.get('excluded_out_of_window',0):,}; no confirmable date "
+                f"{acct.get('excluded_no_date',0):,}). "
+                + ("Buckets reconcile to the window total. " if (scan + reu + exc) == win
+                   else f"(buckets sum to {scan+reu+exc:,}, expected {win:,}.) ")
+                + f"<b>{acct.get('published_findings', ctx['n_pub']):,} published findings</b>. Percentages "
+                "use the window total as the denominator."))(
+                acct.get('window', ctx['n_reviewed']), acct.get('scanned_this_run', 0),
+                acct.get('reused_from_ledger', 0), acct.get('excluded', 0)),
+            TREND),
+        Paragraph(
+            "<i>Full validation limits and coverage gaps (unreadable / unvalidated COAs, untrained years, "
+            "excluded rows) are also in the <b>Coverage Gaps / Unvalidated COAs</b> and <b>Software "
+            "Self-Enhancement &amp; Self-Audit</b> sections.</i>", TREND),
+    ]
 
     # Part A: the three diagnostic blocks below (coverage limitations, date-window integrity, forensic
     # counters) are BUILT here but RELOCATED to the Technical Validation & Diagnostics appendix so the
@@ -5022,7 +5060,9 @@ def build_pdf(out_path, report_no, ctx):
         _vrow("Parser Failures", f"{_parser_failures:,}", "panels printed on a COA but parsed 0") +
         _vrow("Multi-Product COAs", f"{_vg('multi_product_coa_documents', 0):,}") +
         _vrow("Multi-Product Detections", f"{_vg('multi_product_coa_products_recognized', 0):,}", "product blocks recognized inside multi-product COAs") +
-        _vrow("Live URL Verifications", f"{_vg('coas_fetched', 0):,}", "COAs whose live source link was opened this run") +
+        _vrow("COAs re-fetched LIVE this run", f"{_vg('products_freshly_read_live', 0):,}",
+              "genuinely downloaded from the source link this run (reused local PDFs excluded) — agrees with "
+              "'verified live this run' above; was previously mislabeled 'Live URL Verifications' = files opened") +
         _vrow("Online Fallback Recoveries", f"{_vg('online_fallback_recovered_measurements', 0):,}") +
         _vrow("Cache Audit Comparisons", f"{_vg('cache_audit_comparisons', 0):,}",
               ("0 in forensic — cache bypassed, all data cold-read live" if _forensic else "")) +
@@ -5041,17 +5081,11 @@ def build_pdf(out_path, report_no, ctx):
     # caveat that points to the appendix — so the reader reaches the actual findings on the next page.
     _diag_blocks = story[_diag_start:]
     del story[_diag_start:]
-    story.append(Paragraph(
-        "<b>Coverage &amp; software limitations (summary):</b> this run did not fully read every panel on "
-        "every COA, and not every COA was re-validated against its live source this run. <b>Absence of a "
-        "finding is NOT proof a product is clean.</b> The full coverage-limitations breakdown, the "
-        "date-window integrity check, parser/OCR diagnostics, and the raw validation counters are in the "
-        "<b>Technical Validation &amp; Diagnostics</b> appendix near the end of this report.",
-        ParagraphStyle("covcollapse", parent=CTX, fontSize=9.5, leading=13, alignment=0,
-                       textColor=colors.HexColor("#5b4a16"), backColor=colors.HexColor("#fbf6e6"),
-                       borderColor=colors.HexColor("#e4d9a8"), borderWidth=0.6, borderPadding=6,
-                       spaceBefore=8, spaceAfter=10)))
-    story.append(Spacer(1, 6))
+    # TASK 6 — the short coverage/software-limitations caveat that used to sit here is removed: the cover
+    # warning line and the compressed Exec line already state "absence of a finding is not proof of clean"
+    # and point to the appendix, so a third copy on the front is redundant. The FULL breakdown is spliced
+    # into the Technical Validation & Diagnostics appendix via story.extend(_diag_blocks).
+    story.append(Spacer(1, 4))
 
     ai = ctx["analyte_items"]
     metals = sorted([pd for k in ("arsenic", "chromium", "cadmium", "lead", "mercury") for pd in ai[k]],
@@ -5111,10 +5145,10 @@ def build_pdf(out_path, report_no, ctx):
     if not mif:
         mif.append("No result crossed a current CT contaminant limit in this run.")
     story.append(KeepTogether([
-        Paragraph("Most Important Findings", ParagraphStyle("mifh", parent=miniH, fontSize=13, alignment=1)),
+        Paragraph("Most Important Findings", ParagraphStyle("mifh", parent=miniH, fontSize=15, alignment=1)),
         Paragraph("The few things to look at first — each is a <b>lead to verify against the live COA</b>, not a conclusion.",
-                  ParagraphStyle("mifs", parent=CTX, alignment=1, fontSize=9, spaceAfter=4)),
-        Paragraph("• " + "<br/>• ".join(mif), SUMM)]))
+                  ParagraphStyle("mifs", parent=CTX, alignment=1, fontSize=10.5, leading=14, spaceAfter=6)),
+        Paragraph("<br/><br/>".join(mif), SUMM_CTR)]))   # TASK 3 — centered, larger, no left bullets
     story.append(Spacer(1, 10))
 
     # ---- Findings at a Glance: findings-FIRST, so a reader gets the big picture in ~30s ----
@@ -5166,8 +5200,8 @@ def build_pdf(out_path, report_no, ctx):
         Paragraph("A 30-second statewide overview — the single highest readings, where findings concentrate, "
                   "and the broad pattern. The specific items to act on first are in <b>Most Important "
                   "Findings</b> above; this is the big picture, not a repeat of those leads.",
-                  ParagraphStyle("snaps", parent=CTX, alignment=1, fontSize=9, spaceAfter=4)),
-        Paragraph("• " + "<br/>• ".join(glance), SUMM)]))
+                  ParagraphStyle("snaps", parent=CTX, alignment=1, fontSize=10.5, leading=14, spaceAfter=6)),
+        Paragraph("<br/><br/>".join(glance), SUMM_CTR)]))   # TASK 4 — centered, larger, no left bullets
 
     # ---- Parser / Coverage Issues (item 6): report LIMITATIONS surfaced near the top — not findings,
     #      not accusations. Things the program could not fully read/verify, so the reader knows the
@@ -5205,25 +5239,27 @@ def build_pdf(out_path, report_no, ctx):
     # ---- How to read these findings (one legend that defines every category). NOT wrapped in
     #      KeepTogether — that was forcing the whole block onto the next page and leaving a gap; it
     #      now flows naturally and fills the page. ----
+    # TASK 5 — centered, larger, more leading; severity color words preserved; hanging bullets dropped
+    # (centered text + left bullets looks broken) — items are centered statement lines.
     story.append(Paragraph("How To Read These Findings",
-                           ParagraphStyle("legh", parent=miniH, fontSize=12, keepWithNext=0)))
+                           ParagraphStyle("legh", parent=miniH, fontSize=14, alignment=1, keepWithNext=0)))
     story.append(Paragraph(
         "Every flag is a <b>lead, not a conclusion</b> — verify each against the product's live COA. Categories:"
-        "<br/>• <b>Over a current CT limit</b> — the measured result exceeds Connecticut's current legal limit "
+        "<br/><br/><b>Over a current CT limit</b> — the measured result exceeds Connecticut's current legal limit "
         "(a failed result). <font color='#C0392B'>Red</font>."
-        "<br/>• <b>Near-limit / consumer-awareness flag</b> — passed CT's limit but crossed CannaScope's stricter "
+        "<br/><br/><b>Near-limit / consumer-awareness flag</b> — passed CT's limit but crossed CannaScope's stricter "
         "internal watch line; informational only. <font color='#E67E22'>Orange</font> / <font color='#9A7B0A'>Yellow</font>."
-        "<br/>• <b>Strict 10,000 CFU/g benchmark (yeast &amp; mold)</b> — CannaScope's patient-protective benchmark; "
+        "<br/><br/><b>Strict 10,000 CFU/g benchmark (yeast &amp; mold)</b> — CannaScope's patient-protective benchmark; "
         "a product can pass the current 100,000 CT limit yet exceed this. Context, not a CT violation — see the "
         "Yeast & Mold Standard Review."
-        "<br/>• <b>Possible remediation / unusually low microbial load</b> — flower at or under 100 CFU/g; can be "
+        "<br/><br/><b>Possible remediation / unusually low microbial load</b> — flower at or under 100 CFU/g; can be "
         "perfectly normal, shown for awareness only."
-        "<br/>• <b>High cannabinoid review</b> — flower above 35%; a label-accuracy review signal, not a contaminant."
-        "<br/>• <b>Potential compliance review lead</b> — a COA-derived lead for a human/compliance reviewer; never a "
+        "<br/><br/><b>High cannabinoid review</b> — flower above 35%; a label-accuracy review signal, not a contaminant."
+        "<br/><br/><b>Potential compliance review lead</b> — a COA-derived lead for a human/compliance reviewer; never a "
         "legal determination.",
-        ParagraphStyle("legbox", parent=CTX, fontSize=9.5, leading=13, alignment=0,
+        ParagraphStyle("legbox", parent=CTX, fontSize=11, leading=16, alignment=1,
                        textColor=colors.HexColor("#2c3e50"), backColor=colors.HexColor("#eef3f8"),
-                       borderColor=colors.HexColor("#cdd8e4"), borderWidth=0.6, borderPadding=6,
+                       borderColor=colors.HexColor("#cdd8e4"), borderWidth=0.6, borderPadding=8,
                        spaceBefore=10, spaceAfter=10)))
 
     # ---- Conflicting COA Results & Possible Lab-Shopping Indicators (neutral, for review) ----
@@ -5458,15 +5494,42 @@ def build_pdf(out_path, report_no, ctx):
 
     # ---------------- FLAGGED FINDINGS BY PRODUCER (directly under Executive Summary) ----------------
     story.append(H("Flagged Findings by Producer"))
-    intro_box("Counts of published findings per producer. <b>% Flagged = a producer's flagged products &#247; "
-              "that producer's TOTAL products in the dataset window</b> (not flagged-of-flagged), so the rate is "
-              "honest and comparable. A higher rate is a review signal, not proof of a problem.")
-    rows = [[Paragraph(esc(r["label"]), cell), Paragraph(str(r["reviewed"]), cellr),
-             Paragraph(str(r["flagged"]), cellr), Paragraph(f'{r["pct"]:.1f}%', cellr),
-             Paragraph(esc(r["top"]), cell)] for r in ctx["producer_rows"][:18]]
-    story.append(tbl(["Producer", "Products In Window", "Flagged", "% Flagged (of window)", "Most Common Issue"], rows,
-                     [4.0*inch, 1.55*inch, 1.1*inch, 1.55*inch, 2.7*inch],
-                     aligns=["L", "R", "R", "R", "L"]))
+    # TASK 7 — ranked + tier-banded hierarchy. Sort DESCENDING by % Flagged (of window); state the sort and
+    # the band cutoffs in the caption so the grouping is reproducible, not arbitrary.
+    intro_box("Counts of published findings per producer, <b>ranked by % Flagged (of window), highest first</b> — "
+              "a producer's flagged products &#247; that producer's TOTAL products in the dataset window (not "
+              "flagged-of-flagged), so the rate is honest and comparable. <b>Tier bands by % Flagged: Highest "
+              "review priority &ge; 20% &nbsp;·&nbsp; Moderate 10–20% &nbsp;·&nbsp; Low &lt; 10%.</b> A higher rate "
+              "is a review signal, not proof of a problem.")
+    _prows = sorted(ctx["producer_rows"], key=lambda r: (r.get("pct", 0) or 0, r.get("flagged", 0) or 0),
+                    reverse=True)[:18]
+    for _i, _r in enumerate(_prows, 1):
+        _r["_rank"] = _i
+
+    def _tier_of(pct):
+        if pct >= 20: return "Highest review priority"
+        if pct >= 10: return "Moderate"
+        return "Low"
+    _band_cols = ["Rank", "Producer", "Products In Window", "Flagged", "% Flagged (of window)", "Most Common Issue"]
+    _band_widths = [0.6*inch, 3.45*inch, 1.45*inch, 0.95*inch, 1.5*inch, 2.45*inch]
+    _band_aligns = ["C", "L", "R", "R", "R", "L"]
+    for _tname, _tcut, _topband in (("Highest review priority", "&ge; 20%", True),
+                                    ("Moderate", "10–20%", False), ("Low", "&lt; 10%", False)):
+        _grp = [r for r in _prows if _tier_of(r.get("pct", 0) or 0) == _tname]
+        if not _grp:
+            continue
+        story.append(Paragraph(
+            f"<b>{_tname}</b> &nbsp;—&nbsp; % Flagged {_tcut} &nbsp;"
+            f"({len(_grp)} producer{'s' if len(_grp) != 1 else ''})",
+            ParagraphStyle("pband_" + _tname[:4], parent=CTX, alignment=0, fontSize=11 if _topband else 10,
+                           textColor=(colors.white if _topband else colors.HexColor("#1F2D3D")),
+                           backColor=colors.HexColor("#C0392B" if _topband else
+                                                     ("#ffe9c7" if _tname == "Moderate" else "#eef2f5")),
+                           borderPadding=5, spaceBefore=9, spaceAfter=2)))
+        rows = [[Paragraph(f'<b>{r["_rank"]}</b>', cellc), Paragraph(esc(r["label"]), cellb if _topband else cell),
+                 Paragraph(str(r["reviewed"]), cellr), Paragraph(str(r["flagged"]), cellr),
+                 Paragraph(f'{r["pct"]:.1f}%', cellr), Paragraph(esc(r["top"]), cell)] for r in _grp]
+        story.append(tbl(_band_cols, rows, _band_widths, aligns=_band_aligns))
     if ctx["producer_rows"]:
         pc = Counter({r["label"]: r["flagged"] for r in ctx["producer_rows"]})
         tot = sum(pc.values())
@@ -5567,9 +5630,15 @@ def build_pdf(out_path, report_no, ctx):
     if ctx["pathogens"]:
         story.append(H("Pathogen Findings", color=RED))
         story.append(Paragraph("Zero-tolerance pathogen reported DETECTED (do-not-consume if confirmed).", CTX))
+        # TASK 9 — sort most-recent COA test date first (ISO testing_date sorts chronologically), then
+        # re-number the # column to match. Approval date is the fallback when the test date is unparsed.
+        _patho_sorted = sorted(ctx["pathogens"],
+                               key=lambda _pn: (getattr(_pn[0], "testing_date", "")
+                                                or getattr(_pn[0], "approval_date", "") or ""),
+                               reverse=True)
         rows = [[Paragraph(f'<font color="#C0392B"><b>{i}</b></font>', cellc), Paragraph(esc(tcase(p.product_name)), cell),
                  td(p), Paragraph(pr(p), cell), Paragraph(f'<font color="#C0392B"><b>{esc(nice)} DETECTED</b></font>', cellc), coa_cell(p)]
-                for i, (p, nice) in enumerate(ctx["pathogens"][:MAX_TABLE_ROWS], 1)]
+                for i, (p, nice) in enumerate(_patho_sorted[:MAX_TABLE_ROWS], 1)]
         story.append(tbl(["#", "Product", "Testing Date", "Producer", "Pathogen", "COA"], rows,
                          [0.4*inch, 3.2*inch, 0.95*inch, 2.8*inch, 2.0*inch, 1.2*inch]))
         overflow_note(len(ctx["pathogens"]), "CannaScope_CT_V15_Validated_Flagged.csv")
@@ -5615,9 +5684,10 @@ def build_pdf(out_path, report_no, ctx):
     _mm_ids = {id(p) for p, _ in mismatch}
     high_flower = [(p, val) for (p, _k, val) in tf if id(p) not in _imp_ids and id(p) not in _mm_ids]
 
-    # ---- A. High THC Flower Review ----
-    story.append(H("A. High THC Flower Review", color=AQUA))
-    intro_box("Non-infused flower whose <b>verified</b> Total THC is above 35% — a label-accuracy <b>review signal, "
+    # ---- A. Biologically Implausible High THC Flower Review ----
+    story.append(H("A. Biologically Implausible High THC Flower Review", color=AQUA))
+    intro_box("Non-infused flower whose <b>verified</b> Total THC is above 35% — <b>biologically implausible</b> for "
+              "dry flower, so this is a label-accuracy <b>review signal, "
               "not a contaminant/safety finding and not an accusation</b>. Total THC is computed from the COA's own "
               "components (0.877 &#215; THCA + &#916;9-THC), not a possibly-inflated COA-stated figure (older AltaSci "
               "COAs printed 'Total THC' without the 0.877 factor, ~2&#215; too high); the Basis column shows "
@@ -6413,6 +6483,9 @@ def build_pdf(out_path, report_no, ctx):
         story.append(Paragraph("Coverage Limitations (from the cover)", miniH))
         story.append(Paragraph("• " + "<br/>• ".join(_cover_diag_lines),
                                ParagraphStyle("covdiag", parent=CTX, fontSize=9.5, leading=13, alignment=0)))
+    # TASK 2 / TASK 6 — the status banner, validation counters, severity-legend explanation, definitions,
+    # and the full dataset accounting that were moved OFF the cover/Exec render here (nothing deleted).
+    story.extend(_cover_detail)
     story.extend(_diag_blocks)
 
     # ---- Convenient Lab Result Groupings — full statistical detail + methodology ----
@@ -6451,6 +6524,27 @@ def build_pdf(out_path, report_no, ctx):
             "90–100 Extreme boundary clustering. The score rises with near-threshold enrichment (z), "
             "observed/expected ratio, statistical significance, a cliff effect, and tight clustering on round "
             "numbers (e.g. 97,000 / 98,000 / 99,000 CFU/g).", note_st))
+        # TASK 11 — plain-English column legend ABOVE the statistical table(s): each header's meaning + why
+        # it matters, centered and in a larger font, ending with the not-proof-of-intent caveat.
+        story.append(Paragraph(
+            "<b>How to read the columns in the tables below</b><br/>"
+            "<b>N</b> — trustworthy results in this producer+lab group. <i>Why: small N is weak evidence; large N makes a pattern meaningful.</i><br/>"
+            "<b>Near</b> — results in the 95–100%-of-limit band (just under the line). <i>Why: the band a threshold effect would crowd into.</i><br/>"
+            "<b>Over</b> — results above the limit. <i>Why: outright failures, counted separately from 'near'.</i><br/>"
+            "<b>ObsRate</b> — observed near-band rate = Near &#247; N. <i>Why: the group's actual share of just-under-the-line results.</i><br/>"
+            "<b>ExpNear</b> — near-band results expected at the statewide rate. <i>Why: the baseline to compare against.</i><br/>"
+            "<b>O/E</b> — observed &#247; expected near-band count. <i>Why: &gt;1 means more clustering just under the line than chance predicts.</i><br/>"
+            "<b>p(binom)</b> — probability of seeing this many near-band results by chance. <i>Why: a small p (&lt;0.05) means the clustering is unlikely to be random.</i><br/>"
+            "<b>Z</b> — standard deviations the group's near-rate sits above the statewide rate. <i>Why: bigger Z = stronger signal.</i><br/>"
+            "<b>p(χ²)</b> — goodness-of-fit of the group's spread across all bands. <i>Why: flags an unusual overall shape, not just the near band.</i><br/>"
+            "<b>p(Fisher)</b> — small-sample version of the near-vs-not test. <i>Why: used when N is small so the result stays valid.</i><br/>"
+            "<b>Score</b> — Convenience Score 0–100 combining the signals above. <i>Why: one ranked number; 0–24 normal, 25–49 mild, 50–74 review recommended, 75–89 strong, 90–100 extreme.</i><br/>"
+            "<b>Assessment</b> — the plain-English verdict for the row.<br/>"
+            "<b>These are statistically unusual boundary-clustering patterns that warrant review — not proof "
+            "of intent or misconduct.</b>",
+            ParagraphStyle("cglegend", parent=CTX, alignment=1, fontSize=10, leading=14.5,
+                           backColor=colors.HexColor("#fff8ef"), borderColor=colors.HexColor("#e4cba8"),
+                           borderWidth=0.6, borderPadding=8, spaceBefore=8, spaceAfter=8)))
 
         for _ck, _st in _conv.items():
             story.append(Paragraph(
@@ -6923,7 +7017,11 @@ def build_pdf(out_path, report_no, ctx):
     # rendering the header here; otherwise we break first so the title never detaches from its
     # table. (Table column-headers themselves repeat on every page via repeatRows=1, so once a
     # table starts its header is never separated from the rows that follow.)
-    SECTION_MIN = 132
+    # TASK 8 — raised 132 -> 215 so a section header only renders here if there is room for the header +
+    # its subtitle/intro + the table's repeating header row AND a few data rows; otherwise CondPageBreak
+    # starts the section on a fresh page so the header is never orphaned at the bottom (the Yeast & Mold
+    # 6->7 split). Applies to EVERY top-level/subsection header (h1/mh) via _reflow below.
+    SECTION_MIN = 215
     # Base header style names. We match these AND any style that INHERITS from them, so every
     # subsection header (category headers, Ombudsman, TYM, "Most Important Findings", legend, the
     # appendix header) is caught — those all descend from H1 ("h1") or miniH ("mh"). The previous
@@ -7078,26 +7176,28 @@ def compute_run_audit(debug, date_trace, products, all_results, pub, flagged, co
     # (offline), or essentially nothing fetched/OCR'd/re-pulled live — is a CACHE REPLAY, not validation,
     # and gets its own tier so it can never masquerade as a forensic/validated report.
     _cas = str(G("cache_audit_status", "") or "")
-    # A run did NO live verification this run if NOTHING was re-pulled / compared / OCR'd / re-read LIVE.
-    # `coas_fetched` is NOT a reliable live signal — an offline / --force-offline run counts CACHED PDF
-    # reads as "fetched" (which previously hid the replay). The honest signal: products re-verified live,
-    # cache-audit comparisons, fresh OCR, and online-fallback live re-reads ALL zero ⇒ cache replay.
-    # (A normal online run always re-pulls a live sample, so comparisons > 0 ⇒ NOT a replay.)
-    _live_verified_this_run = (G("products_revalidated_live", 0) > 0
-                               or G("products_freshly_read_live", 0) > 0
-                               or G("cache_audit_comparisons", 0) > 0
-                               or ocr_ok > 0
-                               or G("online_fallback_refetched_live", 0) > 0)
-    cache_replay = _cas.startswith("skipped") or not _live_verified_this_run
-    if cache_replay:
-        hi.insert(0, "UNVALIDATED — CACHE REPLAY: no live verification ran this run (cache audit "
-                     f"'{_cas or 'not run'}', {fetched} COA(s) fetched live, {ocr_ok} fresh OCR success(es)). "
-                     "The figures were replayed from the cache and were NOT checked against the live source "
-                     "COAs. Re-run ONLINE (omit --offline), or with --validate for a forensic report.")
+    # TASK 1 HONESTY GATE. "Verified live this run" = the COUNT of products re-verified against their LIVE
+    # source COA this run = cache-audit re-pulls + online-fallback re-reads (both inside products_revalidated_live)
+    # + cold live reads (products_freshly_read_live, which now also credits the ledger/process_product live
+    # downloads). Incidental OCR is processing, NOT source verification, so it can NEVER exempt a 0-live run.
+    _n_live_verified = int(G("products_revalidated_live", 0) or 0) + int(G("products_freshly_read_live", 0) or 0)
+    _offline_replay = _cas.startswith("skipped")     # offline: couldn't reach the live source at all
+    cache_replay = _offline_replay or (_n_live_verified == 0)
+    if _offline_replay:
+        _replay_tier = UNVALIDATED_CACHE_REPLAY
+        hi.insert(0, "UNVALIDATED — CACHE REPLAY: this run was OFFLINE — the live source COAs could not be "
+                     "reached, so NOTHING was verified live. Figures were replayed from the cache. Re-run "
+                     "ONLINE (omit --offline / --force-offline), or with --validate, for a live-verified report.")
+    elif _n_live_verified == 0:
+        _replay_tier = "CACHE-REPLAY — NOT LIVE-VERIFIED THIS RUN"
+        hi.insert(0, "CACHE-REPLAY — NOT LIVE-VERIFIED THIS RUN: 0 of the reviewed products were re-verified "
+                     "against their LIVE source COA this run (served from cache / reused local PDFs; only "
+                     "incidental OCR ran). Findings are MATCHED against cached COAs, NOT re-verified live. "
+                     "Re-run with --live-verify (or --validate) to verify against the live source.")
     if base_status == "FAIL":
         tier = "FAIL"
     elif cache_replay:
-        tier = UNVALIDATED_CACHE_REPLAY
+        tier = _replay_tier
     elif not_ready_years:
         tier = "DIAGNOSTIC REPORT ONLY — YEAR NOT READY"
     elif in_window and pct_analyzed < 60:
@@ -9906,6 +10006,10 @@ def main():
                          "whole window is re-pulled live. The cache is only a speed hint — live is the authority.")
     ap.add_argument("--full-cache-audit", action="store_true", dest="full_cache_audit",
                     help="audit EVERY cached HIT live (not just a sample) before trusting the cache.")
+    ap.add_argument("--live-verify", action="store_true", dest="live_verify",
+                    help="FORCE live-first verification ON: re-fetch EVERY COA from its source link this run "
+                         "(ignore any reused local PDF) and run the full cache self-audit, so a normal online "
+                         "run produces non-zero live coverage. The run log states LIVE VERIFICATION: ON.")
     ap.add_argument("--cache-audit-sample", type=int, default=15, dest="cache_audit_sample",
                     help="how many cached COAs to spot-check live each run when --fast-cache is set "
                          "(default 15; stride-sampled). Ignored by the default live-first run, which audits ALL.")
@@ -10088,6 +10192,19 @@ def main():
     # re-pulled live and corrected (LIVE WINS) BEFORE the scan trusts it. The fast/sampled path is now an
     # explicit opt-OUT (--fast-cache), not the default. --full-cache-audit still forces full; --fast-cache
     # reverts to the old stride sample; --no-cache-audit / --offline still skip (offline = UNVERIFIED).
+    # TASK 1 quick route — --live-verify forces genuine live verification on (re-fetch every COA from its
+    # source link, even if a local PDF exists) + a full cache self-audit. State the mode in ONE plain line.
+    _live_verify = bool(getattr(args, "live_verify", False))
+    if _live_verify and not args.offline:
+        v4.FORCE_LIVE_DOWNLOAD = True
+        args.full_cache_audit = True
+    if args.offline:
+        print("  LIVE VERIFICATION: OFF (offline / cache-replay only — report will be gated NOT LIVE-VERIFIED).")
+    elif _live_verify:
+        print("  LIVE VERIFICATION: ON (forced) — every COA is re-fetched from its source link this run.")
+    else:
+        print("  LIVE VERIFICATION: ON (live-first) — cold-read COAs are verified against their source this "
+              "run; reused local PDFs are NOT counted as live. Use --live-verify to force re-fetch of all.")
     _fast = bool(getattr(args, "fast_cache", False))
     _full_audit = bool(getattr(args, "full_cache_audit", False)) or not _fast
     if csv_cache is not None and getattr(args, "cache_audit", True) and not args.offline:
@@ -10130,6 +10247,13 @@ def main():
             with lock:
                 done += 1
                 all_results.append(p)
+                # TASK 1 — credit a GENUINE live read. The ledger/process_product path live-downloads the
+                # COA from its source link this run (download_pdf sets `_coa_fetched_live` ONLY on a real
+                # network fetch, False on a reused local PDF). Map that to `_online_refetched` so the
+                # validation-coverage counter credits it the same as the --csv-cache live-first path.
+                # Offline runs never fetch live, so this is never set offline (cache-replay honesty intact).
+                if not args.offline and getattr(p, "_coa_fetched_live", False):
+                    p._online_refetched = True
                 if getattr(p, "_coa_present", False):
                     if os.path.exists(v4.cache_path(p)):
                         fetched += 1
@@ -10578,9 +10702,10 @@ def main():
         "cache_audit_coverage_deltas": (cache_audit or {}).get("coverage_deltas", 0),
         "cache_audit_cache_corrected": (cache_audit or {}).get("corrected", 0),
         "cache_audit_cache_distrusted": bool(cache_distrusted),
-        "cache_audit_status": ("skipped (offline)" if (csv_cache is not None and args.offline)
-                               else ("disabled" if not getattr(args, "cache_audit", True) or csv_cache is None
-                                     else ("DISTRUSTED->full live re-pull" if cache_distrusted else "cache verified vs live"))),
+        "cache_audit_status": ("skipped (offline)" if args.offline
+                               else ("disabled (--no-cache-audit)" if not getattr(args, "cache_audit", True)
+                                     else ("live-first (ledger + live download; no csv cache-audit)" if csv_cache is None
+                                           else ("DISTRUSTED->full live re-pull" if cache_distrusted else "cache verified vs live")))),
         "flagged_total": len(flagged),
         "flagged_published": len(pub),
         "coa_verification_queue": len(flagged) - len(pub),
